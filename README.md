@@ -6,16 +6,16 @@ https://arxiv.org/abs/2303.04143
 
 # Introduction
 
-This work extends the previous work [`Parameter Prediction for Unseen Deep Architectures`](https://github.com/facebookresearch/ppuda/).
-Here, we scale up Graph HyperNetworks and release our best performing model `GHN-3-XL/m16`. 
+This work extends the previous work [`Parameter Prediction for Unseen Deep Architectures`](https://github.com/facebookresearch/ppuda/) that introduced improved Graph HyperNetworks (GHN-2).
+Here, we scale up GHN-2 and release our best performing model `GHN-3-XL/m16`. 
 Our GHN-3 can be used as a good initialization for many large ImageNet models. 
 
 Below are a few figures showcasing our results (see the paper for details).
 
 
-<figure> <img src="figs/fig1.png" height="250"></figure>
+<figure> <img src="figs/fig1.png" height="380"></figure>
 
-<figure> <img src="figs/fig4.png" height="150"></figure>
+<figure> <img src="figs/fig4.png" height="160"></figure>
 
 <figure> <img src="figs/fig6.png" height="150"></figure>
 

@@ -44,11 +44,14 @@ from ghn3_utils import from_pretrained
 ghn = from_pretrained()
 
 model = torchvision.models.resnet50()  # can be any torchvision model
-model = ghn(model, GraphBatch([Graph(model)]))
+model = ghn(model, GraphBatch([Graph(model)]), bn_train=False)
 
 # That's it, the ResNet-50 is initialized with our GHN-3.
-
 ```
+
+`bn_train=False` if model will be fine-tuned, 
+`bn_train=True` if model will be directly evaluated.
+
 
 GHN-3 is stored in HuggingFace at 
 https://huggingface.co/SamsungSAILMontreal/ghn3/tree/main.

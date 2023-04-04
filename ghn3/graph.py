@@ -12,6 +12,9 @@ from torchvision.models import SwinTransformer, SqueezeNet, VisionTransformer
 from ppuda.deepnets1m.ops import NormLayers, PosEnc
 from ppuda.deepnets1m.net import get_cell_ind
 from ppuda.deepnets1m.genotypes import PRIMITIVES_DEEPNETS1M
+from ppuda.deepnets1m.graph import GraphBatch
+from .utils import named_layered_modules
+
 
 import sys
 sys.setrecursionlimit(10000)  # for large models like efficientnet_v2_l
@@ -19,7 +22,7 @@ sys.setrecursionlimit(10000)  # for large models like efficientnet_v2_l
 t_long = torch.long
 
 
-class Graph():
+class Graph:
     r"""
     Container for a computational graph of a neural network.
 
@@ -48,7 +51,9 @@ class Graph():
             self._build_graph()   # automatically construct an initial computational graph
             self._add_virtual_edges(ve_cutoff=ve_cutoff)  # add virtual edges
             self._construct_features()  # initialize torch.Tensor node and edge features
-            # self.visualize(figname='graph_swin.pdf', with_labels=True, font_size=4)
+            # self.visualize(figname='graph.pdf', with_labels=True, font_size=4)  # for debugging purposes
+            if not hasattr(model, '_layered_modules'):
+                self.model.__dict__['_layered_modules'] = named_layered_modules(self.model)
         else:
             self.n_nodes = len(node_feat)
             self.node_feat = node_feat
@@ -198,7 +203,8 @@ class Graph():
 
             return node_link, fn_name
 
-        var = self.model(torch.randn(2, *self.expected_input_sz))
+        device = list(self.model.parameters())[0].device
+        var = self.model(torch.randn(2, *self.expected_input_sz, device=device))
         if not isinstance(var, (tuple, list, dict)):
             var = [var]
         if isinstance(var, dict):
@@ -328,7 +334,9 @@ class Graph():
     def _filter_graph(self, unsupported_modules=None):
         r"""
         Remove redundant/unsupported nodes from the automatically constructed graphs.
-        :return:
+        This ended up to be quite messy, so improvements are welcome.
+        :param unsupported_modules: a set of unsupported modules
+        :return: a tuple of the filtered adjacency matrix and the filtered list of nodes
         """
 
         # These ops will not be added to the graph
@@ -337,7 +345,6 @@ class Graph():
             for i, node in enumerate(self._nodes):
                 ind = node['param_name'].find('Backward')
                 name = node['param_name'][:len(node['param_name']) if ind == -1 else ind]
-                # print(name)
                 supported = False
                 for key, value in MODULES.items():
                     if isinstance(key, str):
@@ -346,8 +353,7 @@ class Graph():
                         supported = True
                         break
                 if not supported and name not in MODULES:
-                    if (name.find('AsStrided') < 0 and #not name.endswith('.layer_scale') and
-                            'size' in node['attrs'] and len(node['attrs']['size']) > 0):
+                    if 'size' in node['attrs'] and name.find('AsStrided') < 0 < len(node['attrs']['size']):
                         continue
                     unsupported_modules.add(node['param_name'])
 
@@ -355,6 +361,13 @@ class Graph():
             unsupported_modules = ['Mul'] + list(unsupported_modules) + \
                                   (['Mean', 'Cat'] if self.model is not None and isinstance(self.model, SwinTransformer)
                                    else ['Mean', 'Add', 'Cat'])
+
+        has_sigmoid_swish = False  # this flag is later used to decide if add CSE or not
+        for i, node in enumerate(self._nodes):
+            op_name = node['param_name']
+            if op_name.lower().find('sigmoid') >= 0 or op_name.lower().find('swish') >= 0:
+                has_sigmoid_swish = True
+                break
 
         for pattern in unsupported_modules:
 
@@ -388,9 +401,10 @@ class Graph():
                             # In pytorch <1.9 the computational graph may be inaccurate
                             keep = i < len(self._nodes) - 1 and not self._nodes[i + 1]['param_name'].startswith('cells.')
 
-                    elif op_name.startswith('Mul'):
-                        keep = self._nodes[i - 2]['param_name'].lower().startswith('hard') or \
-                               self._nodes[i + 1]['param_name'].lower().find('sigmoid') >= 0    # CSE op
+                    elif op_name.startswith('Mul'):  # CSE op
+                        keep = has_sigmoid_swish and (self._nodes[i - 2]['param_name'].lower().startswith('hard') or
+                                                      self._nodes[i + 1]['param_name'].lower().find('sigmoid') >= 0 or
+                                                      self._nodes[i + 1]['param_name'].lower().find('relu') >= 0)
 
                     elif op_name.startswith('Cat') or op_name.startswith('Add'):        # Concat and Residual (Sum) ops
                         keep = len(np.where(self._Adj[:, i])[0]) > 1  # keep only if > 1 edges are incoming
@@ -430,17 +444,18 @@ class Graph():
 
         # Check that the graph is connected and all nodes reach the final output
         self._nx_graph_from_adj()
-        # length = nx.shortest_path(self.nx_graph, target=self.n_nodes - 1)
-        # for node in range(self.n_nodes):
-        #     if node not in length:
-        #         print('WARNING: not all nodes reach the final node', node, self._nodes[node])
+        length = nx.shortest_path(self.nx_graph, target=self.n_nodes - 1)
+        for node in range(self.n_nodes):
+            if node not in length:
+                print('WARNING: not all nodes reach the final node', node, self._nodes[node]['param_name'])
 
         # Check that all nodes have a path to the input
-        # length = nx.shortest_path(self.nx_graph, source=0)
-        # for node in range(self.n_nodes):
-        #     if not (node in length or self._nodes[node]['param_name'].startswith('pos_enc') or
-        #             self._nodes[node]['param_name'].find('position_bias') >= 0):
-        #         print('WARNING: not all nodes have a path to the input', node)  # , self._nodes[node]
+        length = nx.shortest_path(self.nx_graph, source=0)
+        for node in range(self.n_nodes):
+            if not (node in length or self._nodes[node]['param_name'].startswith('pos_enc') or
+                    self._nodes[node]['param_name'].find('pos_emb') >= 0 or
+                    self._nodes[node]['param_name'].find('position_bias') >= 0):
+                print('WARNING: not all nodes have a path to the input', node, self._nodes[node]['param_name'])
 
         if ve_cutoff > 1:
             length = dict(nx.all_pairs_shortest_path_length(self.nx_graph, cutoff=ve_cutoff))
@@ -521,12 +536,13 @@ class Graph():
                 sz = (node['module'].weight if param_name.find('weight') >= 0 else node['module'].bias).shape
 
             if sz is not None:
-                if len(sz) == 3 and sz[0] == 1 and min(sz[1:]) > 1:  # [1, 197, 768]
-                    # print('WARNING: setting a 4d size instead of 3d', sz)
-                    s = int(np.ceil(sz[1] ** 0.5))
+                if len(sz) == 3 and sz[0] == 1 and min(sz[1:]) > 1:  # [1, 197, 768] -> [1, 768, 14, 14]
+                    # setting a 4d size instead of 3d to be consistent with the DeepNets dataset
+                    sz_old = sz
+                    s = int(np.floor(sz[1] ** 0.5))
                     sz = (1, sz[2], s, s)
+                    print(f'WARNING: setting a 4d size {sz} instead of 3d {tuple(sz_old)}')
                 elif len(sz) == 4 and node_ind == len(self._nodes) - 2 and max(sz[2:]) == 1:
-                    # print('WARNING: setting a 2d size instead of 4d', sz)
                     sz = sz[:2]
 
             self._param_shapes.append(sz)

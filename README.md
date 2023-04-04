@@ -6,11 +6,18 @@ https://arxiv.org/abs/2303.04143
 
 # Introduction
 
+**Updates**
+
+- [Apr 4, 2023] Slightly updated graph construction for ViT to be consistent with our paper. 
+Made four variants of our GHN-3 available: `ghn3tm8, ghn3sm8, ghn3lm8, ghn3xlm16` (see updated [example.ipynb](example.ipynb)).
+`ghn3tm8` takes just 27MB so it is efficient to use in low-memory cases.
+ 
+
 This work extends the previous work [`Parameter Prediction for Unseen Deep Architectures`](https://github.com/facebookresearch/ppuda/) that introduced improved Graph HyperNetworks (GHN-2).
-Here, we scale up GHN-2 and release our best performing model `GHN-3-XL/m16`. 
+Here, we scale up GHN-2 and release our best performing model `GHN-3-XL/m16` as well as smaller variants. 
 Our GHN-3 can be used as a good initialization for many large ImageNet models. 
 
-Below are a few figures showcasing our results (see the paper for details).
+Below are a few figures showcasing our results (see [our paper](https://arxiv.org/abs/2303.04143) for details).
 
 
 <figure> <img src="figs/fig1.png" height="380"></figure>
@@ -20,8 +27,10 @@ Below are a few figures showcasing our results (see the paper for details).
 <figure> <img src="figs/fig6.png" height="150"></figure>
 
 
-Using GHN-3 is straightforward to use as shown below with PyTorch examples.
+Our code has only a few dependencies and is easy to use as shown below with PyTorch examples.
 
+Please feel free to open a GitHub issue to ask questions or report bugs. 
+Pull requests are also welcome.
 
 # Installation
 
@@ -38,13 +47,16 @@ pip install huggingface_hub  # to load the GHN-3 model
 
 
 ```
+import torch
 import torchvision
-from ghn3_utils import from_pretrained
+from ghn3 import from_pretrained, Graph, GraphBatch
 
-ghn = from_pretrained()
+ghn = from_pretrained()  # default is 'ghn3xlm16.pt', other variants are: 'ghn3tm8.pt', 'ghn3sm8.pt', 'ghn3lm8.pt'
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 model = torchvision.models.resnet50()  # can be any torchvision model
-model = ghn(model, GraphBatch([Graph(model)]), bn_train=False)
+model = ghn(model, GraphBatch([Graph(model)]).to_device(device), bn_train=False)
 
 # That's it, the ResNet-50 is initialized with our GHN-3.
 ```
@@ -55,7 +67,7 @@ model = ghn(model, GraphBatch([Graph(model)]), bn_train=False)
 
 GHN-3 is stored in HuggingFace at 
 https://huggingface.co/SamsungSAILMontreal/ghn3/tree/main.
-As the model takes about 2.5GB, 
+As the largest model (`ghn3xlm16.pt`) takes about 2.5GB, 
 it takes a while to download the model during 
 the first call of `ghn = from_pretrained()`.
 

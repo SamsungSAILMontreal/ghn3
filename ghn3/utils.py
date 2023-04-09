@@ -12,29 +12,29 @@ from huggingface_hub import hf_hub_download
 import joblib
 
 
-def from_pretrained(ghn3_path='ghn3xlm16.pt', device='cpu'):
+def from_pretrained(ghn3_name='ghn3xlm16.pt', device='cpu', **kwargs):
 
-    if ghn3_path.startswith('ghn3t'):
+    if ghn3_name.startswith('ghn3t'):
         hid = 64
         heads = 8
         layers = 3
-    elif ghn3_path.startswith('ghn3s'):
+    elif ghn3_name.startswith('ghn3s'):
         hid = 128
         heads = 16
         layers = 5
-    elif ghn3_path.startswith('ghn3l'):
+    elif ghn3_name.startswith('ghn3l'):
         hid = 256
         heads = 16
         layers = 12
-    elif ghn3_path.startswith('ghn3xl'):
+    elif ghn3_name.startswith('ghn3xl'):
         hid = 384
         heads = 16
         layers = 24
     else:
-        raise NotImplementedError(ghn3_path)
+        raise NotImplementedError(ghn3_name)
 
     ghn = GHN(hid=hid, max_shape=(hid, hid, 16, 16), num_classes=1000,
-              weight_norm=True, ve=True, layernorm=True)
+              weight_norm=True, ve=True, layernorm=True, **kwargs)
 
     ghn.gnn = SequentialMultipleInOut(*[
         GraphormerLayer(dim=hid,
@@ -60,7 +60,7 @@ def from_pretrained(ghn3_path='ghn3xlm16.pt', device='cpu'):
     ghn.decoder.class_layer_predictor[dec_layer] = torch.nn.Linear(conv.weight.shape[1],
                                                                    conv.weight.shape[0]).to(device)
 
-    ghn.load_state_dict(joblib.load(hf_hub_download(repo_id='SamsungSAILMontreal/ghn3', filename=ghn3_path)))
+    ghn.load_state_dict(joblib.load(hf_hub_download(repo_id='SamsungSAILMontreal/ghn3', filename=ghn3_name)))
     print('loading GHN-3 with %d parameters is done!' % sum([p.numel() for p in ghn.parameters()]))
 
     # copy the node embeddings for compatibility with GHN-2 code
@@ -223,7 +223,8 @@ class GraphormerLayer(nn.Module):
         return (x, edges, mask) if self.return_edges else x[0]
 
 
-# Slightly adjusted decoder forward pass of GHNs
+# Modified functions of the GHNs
+
 def decoder_forward(self, x, max_shape=(1, 1, 1, 1), class_pred=False):
 
     offset = self.out_shape[2] // 2
@@ -251,7 +252,6 @@ def decoder_forward(self, x, max_shape=(1, 1, 1, 1), class_pred=False):
     return x
 
 
-# Slightly adjusted tile function of the GHNs
 def _tile_params(self, w, target_shape):
 
     t, s = target_shape, w.shape
@@ -432,12 +432,10 @@ def _map_net_params(self, graphs, nets_torch, sanity_check=False):
     params_map = {}
 
     nets_torch = [nets_torch] if type(nets_torch) not in [tuple, list] else nets_torch
-
     for b, (node_info, net) in enumerate(zip(graphs.node_info, nets_torch)):
 
         target_modules = net.__dict__['_layered_modules'] if self.training else named_layered_modules(net)
 
-        # print(target_modules)
         param_ind = torch.sum(graphs.n_nodes[:b]).item()
 
         for cell_id in range(len(node_info)):
@@ -495,12 +493,13 @@ def _map_net_params(self, graphs, nets_torch, sanity_check=False):
                     mapping[key].append(param_ind + node_ind)
                     del target_modules[cell_id][param_name]
 
-            # Prune redundant ops in Network by setting their params to None
-            for m in target_modules[cell_id].values():
-                if m['is_w']:
-                    m['module'].weight = None
-                    if hasattr(m['module'], 'bias') and m['module'].bias is not None:
-                        m['module'].bias = None
+            if self.training:
+                # Prune redundant ops in Network by setting their params to None to speed up training
+                for m in target_modules[cell_id].values():
+                    if m['is_w']:
+                        m['module'].weight = None
+                        if hasattr(m['module'], 'bias') and m['module'].bias is not None:
+                            m['module'].bias = None
 
     return mapping, params_map
 
@@ -546,7 +545,7 @@ def shapeenc_forward(self, x, params_map, predict_class_layers=True):
 
         if self.debug_level and not self.printed_warning:  # print a warning once per architecture
             if recognized_sz != 4:
-                print( 'WARNING: unrecognized shape %s, so the closest shape at index %s will be used instead.' % (
+                print('WARNING: unrecognized shape %s, so the closest shape at index %s will be used instead.' % (
                     sz_org, ([self.channels[c.item()] if i < 2 else self.spatial[c.item()] for i, c in
                               enumerate(shape_ind[node_ind])])))
                 self.printed_warning = True

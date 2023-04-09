@@ -8,6 +8,7 @@ https://arxiv.org/abs/2303.04143
 
 **Updates**
 
+- [Apr 11, 2023] Cleaned up graph construction, sanity check for all PyTorch models.
 - [Apr 4, 2023] Slightly updated graph construction for ViT to be consistent with our paper. 
 Made four variants of our GHN-3 available: `ghn3tm8, ghn3sm8, ghn3lm8, ghn3xlm16` (see updated [example.ipynb](example.ipynb)).
 `ghn3tm8` takes just 27MB so it is efficient to use in low-memory cases.

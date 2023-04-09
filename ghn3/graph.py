@@ -1,4 +1,4 @@
-# Adjusted graph.py to support graph construction in all PyTorch models
+# Adjusted graph.py to support graph construction of all PyTorch models
 # based on https://github.com/facebookresearch/ppuda/blob/main/ppuda/deepnets1m/graph.py
 
 
@@ -7,9 +7,10 @@ import copy
 import torch
 import torch.nn as nn
 import networkx as nx
+import transformers
 import torchvision
-from torchvision.models import SwinTransformer, SqueezeNet, VisionTransformer
-from ppuda.deepnets1m.ops import NormLayers, PosEnc
+import torchvision.models as models
+import ppuda.deepnets1m.ops as ops
 from ppuda.deepnets1m.net import get_cell_ind
 from ppuda.deepnets1m.genotypes import PRIMITIVES_DEEPNETS1M
 from ppuda.deepnets1m.graph import GraphBatch
@@ -33,25 +34,44 @@ class Graph:
     """
 
     def __init__(self, model=None, node_feat=None, node_info=None, A=None, edges=None, net_args=None, net_idx=None,
-                 ve_cutoff=50, list_all_nodes=False):
+                 ve_cutoff=50, list_all_nodes=False, reduce_graph=True, fix_weight_edges=True, fix_softmax_edges=True,
+                 verbose=True):
         r"""
+        Pass either model or node/edge arguments.
         :param model: Neural Network inherited from nn.Module
+        :param node_feat: node features (optional, only if model is None)
+        :param node_info: node meta-information (optional, only if model is None)
+        :param A: adjacency matrix in the dense format (optional, only if model is None)
+        :param edges: adjacency matrix in the sparse format (optional, only if model is None)
+        :param net_args: network arguments (optional, only if model is None)
+        :param net_idx: network index in the DeepNets-1M dataset (optional, only if model is None)
+        :param ve_cutoff: virtual edge cutoff
+        :param list_all_nodes: for dataset generation
+        :param reduce_graph: remove redundant/unsupported nodes
+        :param fix_weight_edges: rewire edges to/from the weight nodes to make it a correct DAG
+        :param fix_softmax_edges: rewire edges to/from the softmax nodes to make it consistent with DeepNets-1M DAGs
+        :param verbose: print warnings
         """
 
         assert node_feat is None or model is None, 'either model or other arguments must be specified'
 
         self.model = model
         self._list_all_nodes = list_all_nodes  # True in case of dataset generation
+        self._verbose = verbose
+        self._reduce_graph = reduce_graph
+        self._fix_weight_edges = fix_weight_edges
+        self._fix_softmax_edges = fix_softmax_edges
         self.nx_graph = None  # NetworkX DiGraph instance
 
         if model is not None:
-            sz = model.expected_input_sz if hasattr(model, 'expected_input_sz') else 224   # assume ImageNet image width/heigh by default
-            self.expected_input_sz = sz if isinstance(sz, (tuple, list)) else (3, sz, sz)  # assume images by default
+            # by default assume that the models are for ImageNet images of size 224x224
+            sz = model.expected_input_sz if hasattr(model, 'expected_input_sz') else 224
+            self.expected_input_sz = sz if isinstance(sz, (tuple, list)) else (3, sz, sz)
             self.n_cells = self.model._n_cells if hasattr(self.model, '_n_cells') else 1
             self._build_graph()   # automatically construct an initial computational graph
             self._add_virtual_edges(ve_cutoff=ve_cutoff)  # add virtual edges
             self._construct_features()  # initialize torch.Tensor node and edge features
-            # self.visualize(figname='graph.pdf', with_labels=True, font_size=4)  # for debugging purposes
+            # self.visualize(figname='graph', with_labels=True, font_size=4)  # for debugging purposes
             if not hasattr(model, '_layered_modules'):
                 self.model.__dict__['_layered_modules'] = named_layered_modules(self.model)
         else:
@@ -69,7 +89,6 @@ class Graph:
 
         self.net_args = net_args
         self.net_idx = net_idx
-
 
     def num_valid_nodes(self, model=None):
         r"""
@@ -107,21 +126,23 @@ class Graph:
 
         return valid_ops  # valid_params,
 
-
     def _build_graph(self):
         r"""
         Constructs a graph of a neural network in the automatic way.
         This function is written based on Sergey Zagoruyko's https://github.com/szagoruyko/pytorchviz/blob/master/torchviz/dot.py (MIT License)
         PyTorch 1.9+ is required to run this script correctly for some architectures.
-        Currently, the function is not written very clearly and may be improved.
-
-        Issue: for Pytorch's torch.nn.Transformer the graph does not look correct at the moment.
+        Currently, the function is not written very clearly and so it may be improved.
         """
 
         param_map = {id(weight): (name, module) for name, (weight, module) in self._named_modules().items()}
         nodes, edges, seen = {}, [], {}
 
         def get_attr(fn):
+            """
+            Get extra attributes of a node in a computational graph that can help identify the node.
+            :param fn:
+            :return:
+            """
             attrs = dict()
             for attr in dir(fn):
                 if not attr.startswith('_saved_'):
@@ -137,6 +158,12 @@ class Graph:
             return attrs
 
         def traverse_graph(fn):
+            r"""
+            Traverse the computational graph of a neural network in the backward direction starting
+            from the output node (var).
+            :param fn:
+            :return:
+            """
             assert not torch.is_tensor(fn)
             if fn in seen:
                 return seen[fn]
@@ -150,20 +177,7 @@ class Graph:
                         if uu is not None:  # so it's okay to keep uu=u[0] since u[1] never has variable field
                             if hasattr(uu, 'variable'):
                                 var = uu.variable
-                                try:
-                                    name, module = param_map[id(var)]
-                                except:
-                                    print(uu, fn_name, var.size())
-                                    raise
-
-                                is_convnext = (name.find('.layer_scale') >= 0 and
-                                               torchvision.models.convnext.CNBlock not in MODULES)
-                                is_vit_torch = isinstance(module, VisionTransformer)
-                                is_swin_torch = (name.find('relative_position_bias_table') >= 0)
-                                if (type(module) in NormLayers and name.find('.bias') >= 0) or is_convnext or \
-                                        is_vit_torch or is_swin_torch:
-                                    continue  # do not add biases of NormLayers as nodes
-
+                                name, module = param_map[id(var)]
                                 leaf_nodes.append({'id': uu,
                                                    'param_name': name,
                                                    'attrs': {'size': var.size(), **get_attr(var)},
@@ -185,10 +199,9 @@ class Graph:
                         link_start = node_link
 
                     seen[leaf['id']] = (node_link, leaf['param_name'])
-                    nodes[node_link] = {
-                                  'param_name': leaf['param_name'],
-                                  'attrs': leaf['attrs'],
-                                  'module': leaf['module']}
+                    nodes[node_link] = {'param_name': leaf['param_name'],
+                                        'attrs': leaf['attrs'],
+                                        'module': leaf['module']}
 
             seen[fn] = (node_link, fn_name)
 
@@ -203,8 +216,14 @@ class Graph:
 
             return node_link, fn_name
 
-        device = list(self.model.parameters())[0].device
-        var = self.model(torch.randn(2, *self.expected_input_sz, device=device))
+        device = list(self.model.parameters())[0].device  # assume all params are on the same device
+        # Get model output (var) and then traverse the graph backward
+        if hasattr(self.model, 'get_var'):
+            # get_var() can be used for the models in which the input is not a 4d tensor (batch of images)
+            var = self.model.get_var()
+        else:
+            var = self.model(torch.randn(2, *self.expected_input_sz, device=device))
+
         if not isinstance(var, (tuple, list, dict)):
             var = [var]
         if isinstance(var, dict):
@@ -213,83 +232,108 @@ class Graph:
             if v is not None:
                 traverse_graph(v.grad_fn)  # populate nodes and edges
 
-        nodes_lookup = { key: i  for i, key in enumerate(nodes) }
-        nodes = [ {'id': key, **nodes[key]} for key in nodes_lookup ]
-        A = np.zeros((len(nodes), len(nodes)))  # +1 for the input node added below
+        nodes_lookup = {key: i for i, key in enumerate(nodes)}
+        nodes = [{'id': key, **nodes[key]} for key in nodes_lookup]
+        A = np.zeros((len(nodes), len(nodes)))
         for out_node_id, in_node_id in edges:
             A[nodes_lookup[out_node_id], nodes_lookup[in_node_id]] = 1
 
         self._Adj = A
         self._nodes = nodes
-        A, nodes = self._filter_graph()
+        if self._reduce_graph:
+            A, nodes = self._filter_graph()  # Filter graph first time to remove most of the redundant/unsupported nodes
 
-        def fix_weight_bias():
-            # Fix fc layers nodes and edge directions
-            for pattern in ['weight']: #, 'bias']:  #  bias for pytorch's transformer layer
-                for i, node in enumerate(nodes):
-                    if (A[:, i].sum() == 0 and  # no incoming nodes
-                            node['param_name'].find(pattern) >= 0): #and A[i, :].sum() <= 2):  # no more than 2 outcoming edges (not stable for all cases)
-                        param_name_sfx = node['param_name'][:node['param_name'].rfind('.')]
-                        for out_neigh in np.where(A[i, :])[0]:  # all nodes where there is an edge from i, e.g. bias or msa
+        if self._fix_weight_edges:
+            # The weight tensor is often incorrectly placed as a leaf node with a wrong edge direction.
+            # For example, for a two layer network like:
+            # self.fc = nn.Sequential(
+            #             nn.Linear(in_features, in_features),
+            #             nn.ReLU(),
+            #             nn.Linear(in_features, out_features),
+            #         )
+            # the edges can be layer0.bias->layer1.bias and layer1.weight->layer1.bias, so layer1.weight does not have
+            # incoming edges and is unreachable if we traverse the graph in the forward direction.
+            # The loop below corrects the graph by making the edges like layer0.bias->layer1.weight->layer1.bias.
 
-                            if not (nodes[out_neigh]['param_name'].startswith(param_name_sfx)
-                                    or nodes[out_neigh]['param_name'].lower().find('softmax') >= 0
-                                    or (nodes[out_neigh]['param_name'].lower().find('add') >= 0 and A[i, :].sum() == 2)):  # to handle DETR and pytorch's multihead attention when the key != query
-                                continue  # parameter name should be the same otherwise rewiring can go wrong
-
-                            in_out = np.where(A[:, out_neigh])[0]   # incoming to the bias or msa
-                            in_out_conn, in_out_bias = [], []
-                            for j in in_out:
-                                if i == j:
-                                    continue
-                                if nodes[j]['param_name'].startswith(param_name_sfx):
-                                    in_out_bias.append(j)
-                                    continue
-                                if A[i, j] != 0: # or nodes[j]['param_name'].find('bias') < 0:
-                                    continue  # if incoming to the bias does not have incoming edges and it's a weight or there is and edge from i (weight) to the bias, then don't do anything
-                                in_out_conn.append(j)
-                            in_out = np.array(in_out_conn)
-                            in_out_bias = np.array(in_out_bias)
-                            if len(in_out) == 0:
-                                continue
-                            A[in_out, i] = 1  # rewire edges coming to out_neigh (bias, AddB0) to node i (weight)
-                            A[:, out_neigh] = 0  # remove all edges to out_neigh (bias or msa) from the nodes that have outcoming edges
-                            if len(in_out_bias) > 0:
-                                A[i, in_out_bias] = 1
-                                A[in_out_bias, out_neigh] = 1  # keep the edge from i to out_neigh
-                            else:
-                                A[i, out_neigh] = 1  # keep the edge from i to out_neigh
-                            A[i, i] = 0  # remove loop
-
-        fix_weight_bias()
-
-        for pattern in ['softmax']:
+            pattern = 'weight'  # we assume the leaf modules should have a weight attribute
             for i, node in enumerate(nodes):
-                if (node['param_name'].lower().find(pattern) >= 0):
-                    for out_neigh in np.where(A[i, :])[0]:  # all nodes following node i (msa)
-                        in_out = np.where(A[:, out_neigh])[0]  # nodes coming to out_neigh
-                        # remove all edges coming to the node next to msa
-                        # except the edge from msa to the next node
-                        A[in_out, out_neigh] = 0  # rewire edges
-                        A[i, out_neigh] = 1
-                        A[i, i] = 0  # remove loop
+                if A[:, i].sum() > 0:  # if there are incoming edges to the node, then it already should be correct
+                    continue
+                if node['param_name'].find(pattern) < 0:  # if no 'weight' string in the name, assume graph is correct
+                    continue
 
-        if self.model is not None and isinstance(self.model, SwinTransformer):
+                for out_neigh in np.where(A[i, :])[ 0]:  # all nodes with an edge from the weight node, e.g. bias
+
+                    is_same_layer = node['module'] == nodes[out_neigh]['module']
+
+                    if is_same_layer:
+
+                        n_out = len(np.where(A[i, :])[0])  # number of out neighbors the weight node has
+
+                        in_out = np.setdiff1d(np.where(A[:, out_neigh])[0], i)  # incoming to the bias except the i node
+                        if len(in_out) == 0:  # if the w (i) is the only incoming to the b, then it should be correct
+                            continue
+
+                        nodes[i], nodes[out_neigh] = nodes[out_neigh], nodes[i]
+                        A[i, out_neigh], A[out_neigh, i] = 0, 1
+
+                        if n_out == 1:
+                            # out_neigh is the weight node after swapping, while i is the bias node
+                            out_new = np.setdiff1d(np.where(A[out_neigh, :])[0], i)  # outcoming from w except the bias
+                            if len(out_new) == 0:
+                                continue
+                            A[out_neigh, out_new] = 0  # remove the edges from the weight to out_new
+                            A[i, out_new] = 1  # add edges from the bias to out_new
+
+        if self._fix_softmax_edges:
+            # Fix softmax/msa edges to be consistent with the GHN/DeepNets-1M code
+            pattern = 'softmax'
+            self.nx_graph = self._nx_graph_from_adj(A=A)
+            for i, node in enumerate(nodes):
+                if node['param_name'].lower().find(pattern) < 0:
+                    continue
+                for out_neigh in np.where(A[i, :])[0]:  # all nodes following i (msa/softmax), usually just one node
+                    in_out = np.setdiff1d(np.where(A[:, out_neigh])[0], i)  # nodes coming to out_neigh, except from i
+                    for j in in_out:
+                        # remove all edges coming to the node next to msa
+                        n_paths = 0
+                        for _ in nx.all_simple_paths(self.nx_graph, j, out_neigh):
+                            n_paths += 1
+                            if n_paths > 1:
+                                break
+
+                        A[j, out_neigh] = 0  # For ViTs, there should be 2 paths, so remove the 2nd edge to msa/softmax
+                        if n_paths == 1:
+                            # if only one path from j to out_neigh, then the edge (j, i) will replace (j, out_neigh)
+                            A[j, i] = 1
+
+        if sum(A[np.diag_indices_from(A)]) > 0 and self._verbose:
+            print('WARNING: diagonal elements of the adjacency matrix should be zero', sum(A[np.diag_indices_from(A)]))
+
+        if self.model is not None and isinstance(self.model, models.SwinTransformer):
+            # For SwinTransformer some edges do not match the code, so fixing them manually
             for i, node in enumerate(nodes):
                 if node['param_name'].lower().endswith('norm.weight'):
                     for out_neigh in np.where(A[i, :])[0]:
-                        if nodes[out_neigh]['param_name'].endswith('norm1.weight'):
+                        if nodes[out_neigh]['param_name'].endswith('norm1.weight') or \
+                                nodes[out_neigh]['param_name'].find('Add') >= 0:
                             A[i, out_neigh] = 0
+                            target_node = node['param_name'].replace('norm', 'reduction')
+                            for j, node2 in enumerate(nodes):
+                                if node2['param_name'].find(target_node) >= 0:
+                                    A[i, j] = 1
+                                    break
                 elif node['param_name'].lower().endswith('attn.proj.bias'):
                     for out_neigh in np.where(A[i, :])[0]:
                         if nodes[out_neigh]['param_name'].endswith('reduction.weight'):
                             A[i, out_neigh] = 0  # from attn.bias to reduction.weight
                             for out_neigh2 in np.where(A[out_neigh, :])[0]:
-                                # print(node['param_name'], nodes[out_neigh2]['param_name'])
                                 if nodes[out_neigh2]['param_name'].startswith('AddBackward'):
                                     A[i, out_neigh2] = 1  # from attn.bias to reduction.weight
 
-        A, nodes = self._filter_graph(unsupported_modules=set(['Add', 'Cat']))
+        if self._reduce_graph:
+            # Filter the graph one more time, since above manipulations could lead to redundant add/concat nodes
+            A, nodes = self._filter_graph(unsupported_modules=['Add', 'Cat'])
 
         # Add input node
         try:
@@ -300,7 +344,7 @@ class Graph:
                 if nodes[ind]['param_name'].find('weight') >= 0:
                     A[-1, ind] = 1
         except Exception as e:
-            print('!!! ERROR: adding input node failed', e)
+            print('WARNING: adding input node failed:', e)
 
         # Sort nodes in a topological order consistent with forward propagation
         try:
@@ -309,114 +353,124 @@ class Graph:
             nodes = [nodes[i] for i in ind]
             A = A[ind, :][:, ind]
         except Exception as e:
-            print('!!! ERROR: topological sort failed', e)
+            print('WARNING: topological sort failed:', e)
 
-        # Adjust graph for Transformers to be consistent with our original code
-        for i, node in enumerate(nodes):
-            if isinstance(node['module'], (PosEnc, torchvision.models.vision_transformer.Encoder)):
-                nodes.insert(i + 1, { 'id': 'sum_pos_enc', 'param_name': 'AddBackward0', 'attrs': None, 'module': None })
-                A = np.insert(A, i, 0, axis=0)
-                A = np.insert(A, i, 0, axis=1)
-                A[i, i + 1] = 1  # pos_enc to sum
+        if self.model is not None:
+            # Fix some issues with automatically constructing graphs for some models
+            if isinstance(self.model, models.VisionTransformer):
+                # Adjust PosEnc for PyTorch ViTs to be consistent with the GHN/DeepNets-1M code
+                for i, node in enumerate(nodes):
+                    if isinstance(node['module'], (ops.PosEnc, models.vision_transformer.Encoder)):
+                        nodes.insert(i + 1,
+                                     {'id': 'sum_pos_enc', 'param_name': 'AddBackward0', 'attrs': None, 'module': None})
+                        A = np.insert(A, i, 0, axis=0)
+                        A = np.insert(A, i, 0, axis=1)
+                        A[i, i + 1] = 1  # pos_enc to sum
 
-        if self.model is not None and isinstance(self.model, SqueezeNet):
-            assert nodes[-1]['param_name'].startswith('MeanBackward'), nodes[-1]
-            assert nodes[-3]['param_name'].startswith('classifier'), nodes[-3]
-            nodes.insert(len(nodes) - 3, copy.deepcopy(nodes[-1]))
-            del nodes[-1]
+            elif isinstance(self.model, models.SqueezeNet):
+                # Adjust classifier in PyTorch SqueezeNet so that global avg is before classifier
+                assert nodes[-1]['param_name'].startswith('MeanBackward'), nodes[-1]
+                assert nodes[-3]['param_name'].startswith('classifier'), nodes[-3]
+                nodes.insert(len(nodes) - 3, copy.deepcopy(nodes[-1]))
+                del nodes[-1]
 
         self._Adj = A
         self._nodes = nodes
 
         return
 
-
     def _filter_graph(self, unsupported_modules=None):
         r"""
-        Remove redundant/unsupported nodes from the automatically constructed graphs.
-        This ended up to be quite messy, so improvements are welcome.
-        :param unsupported_modules: a set of unsupported modules
+        Remove redundant/unsupported (e.g. internal PyTorch) nodes from the automatically constructed graph.
+        This function ended up to be quite messy and potentially brittle, so improvements are welcome.
+        :param unsupported_modules: a set/list of unsupported modules
         :return: a tuple of the filtered adjacency matrix and the filtered list of nodes
         """
 
-        # These ops will not be added to the graph
+        # The unsupported_modules will not be added to the graph
+        # These are generally some internal PyTorch ops that are not very meaningful (e.g. ViewBackward)
         if unsupported_modules is None:
             unsupported_modules = set()
             for i, node in enumerate(self._nodes):
                 ind = node['param_name'].find('Backward')
-                name = node['param_name'][:len(node['param_name']) if ind == -1 else ind]
+                op_name = node['param_name'][:len(node['param_name']) if ind == -1 else ind]
+
                 supported = False
-                for key, value in MODULES.items():
-                    if isinstance(key, str):
-                        continue
-                    if isinstance(node['module'], key):
-                        supported = True
-                        break
-                if not supported and name not in MODULES:
-                    if 'size' in node['attrs'] and name.find('AsStrided') < 0 < len(node['attrs']['size']):
-                        continue
+
+                if type(node['module']) in ops.NormLayers and op_name.endswith('.bias'):
+                    # In the GHN-2/GHN-3 works the biases of NormLayers are excluded from the graph,
+                    # because the biases are always present in NormLayers and thus such nodes are redundant
+                    # The parameters of these biases are still predicted
+
+                    pass
+
+                else:
+                    for module_name_type in MODULES:
+                        if not isinstance(module_name_type, str) and isinstance(node['module'], module_name_type):
+                            supported = True
+                            break
+                if not supported and op_name not in MODULES:
                     unsupported_modules.add(node['param_name'])
 
-            # Add ops requiring extra checks before removing
-            unsupported_modules = ['Mul'] + list(unsupported_modules) + \
-                                  (['Mean', 'Cat'] if self.model is not None and isinstance(self.model, SwinTransformer)
-                                   else ['Mean', 'Add', 'Cat'])
+            # Add ops requiring extra checks (in the loop below) before removing
+            # Staring with 'Mul' to identify CSE nodes (ops like sigmoid/swish need to be in the graph)
+            unsupported_modules = ['Mul'] + list(unsupported_modules) + ['Mean', 'Add', 'Cat']
 
-        has_sigmoid_swish = False  # this flag is later used to decide if add CSE or not
+        has_sigmoid_swish_cse = False  # this flag is later used to decide if add a CSE operation or not
+        n_incoming = []  # number of incoming edges for each node
         for i, node in enumerate(self._nodes):
-            op_name = node['param_name']
-            if op_name.lower().find('sigmoid') >= 0 or op_name.lower().find('swish') >= 0:
-                has_sigmoid_swish = True
-                break
+            n_incoming.append(len(np.where(self._Adj[:, i])[0]))
+            if not has_sigmoid_swish_cse:
+                op_name = node['param_name'].lower()
+                if op_name.find('sigmoid') >= 0 or op_name.find('swish') >= 0:
+                    # Here we make a (quite weak) assumption that networks with the sigmoid/swish ops have CSE nodes
+                    has_sigmoid_swish_cse = True
 
-        for pattern in unsupported_modules:
+        # Loop over all unsupported_modules and all nodes
+        for module_name in unsupported_modules:
 
             ind_keep = []
 
             for i, node in enumerate(self._nodes):
+
+                keep = True  # keep the node in the graph
                 op_name, attrs = node['param_name'], node['attrs']
 
-                if op_name.find(pattern) >= 0:
+                if op_name.find(module_name) >= 0:
 
-                    keep = False
+                    # Checks for the CSE operation and Add/Concat redundant nodes
+                    try:
+                        neighbors = dict([(j, self._nodes[i + j]['param_name'].lower()) for j in [-1, -2, 1]])
+                        # Check that this node belongs to the classification head by assuming a certain order of nodes
+                        classifier_head = np.any([neighbors[j].startswith(('classifier', 'fc', 'head')) for j in [-1, -2]])
+                    except Exception as e:
+                        print(e, i, len(self._nodes), op_name)
+                        classifier_head = True  # tricky case (set to True for now)
 
                     if op_name.startswith('Mean'):
-                        # Avoid adding mean operations (in CSE)
-                        if not self._nodes[i - 1]['param_name'].startswith('classifier') and \
-                                not self._nodes[i + 1]['param_name'].startswith('classifier') and \
-                                not self._nodes[i - 1]['param_name'].startswith('fc') and \
-                                not self._nodes[i + 1]['param_name'].startswith('fc') and \
-                                not self._nodes[i - 1]['param_name'].startswith('head') and \
-                                not self._nodes[i + 1]['param_name'].startswith('head'):
-                            keep = False
-                        elif isinstance(attrs, dict) and 'keepdim' in attrs:
-                            keep = attrs['keepdim'] == 'True' or \
-                                   self._nodes[i - 2]['param_name'].startswith('classifier') or \
-                                   self._nodes[i - 1]['param_name'].startswith('classifier') or \
-                                   self._nodes[i - 2]['param_name'].startswith('fc') or \
-                                   self._nodes[i - 1]['param_name'].startswith('fc') or \
-                                   self._nodes[i - 2]['param_name'].startswith('head') or \
-                                   self._nodes[i - 1]['param_name'].startswith('head')
-                        else:
-                            # In pytorch <1.9 the computational graph may be inaccurate
-                            keep = i < len(self._nodes) - 1 and not self._nodes[i + 1]['param_name'].startswith('cells.')
+                        if has_sigmoid_swish_cse:
+                            # Do not add the Mean op in CSE unless it's the last global pooling/classification head
+                            keep = classifier_head
 
-                    elif op_name.startswith('Mul'):  # CSE op
-                        keep = has_sigmoid_swish and (self._nodes[i - 2]['param_name'].lower().startswith('hard') or
-                                                      self._nodes[i + 1]['param_name'].lower().find('sigmoid') >= 0 or
-                                                      self._nodes[i + 1]['param_name'].lower().find('relu') >= 0)
+                    elif op_name.startswith('Mul'):
+                        # If below is True, then this Mul op is assumed to be the CSE op
+                        # Otherwise, it is some other Mul op that we do not need to add to the graph
+                        keep = has_sigmoid_swish_cse and \
+                               not classifier_head and \
+                               (neighbors[-2].startswith(('hard', 'sigmoid')) or
+                                neighbors[1].startswith(('hard', 'sigmoid', 'relu')))
 
-                    elif op_name.startswith('Cat') or op_name.startswith('Add'):        # Concat and Residual (Sum) ops
-                        keep = len(np.where(self._Adj[:, i])[0]) > 1  # keep only if > 1 edges are incoming
+                    elif op_name.startswith(('Cat', 'Add')):  # Concat and Residual (Sum) ops
+                        keep = n_incoming[i] > 1  # keep only if > 1 edges are incoming, otherwise the node is redundant
+                    else:
+                        keep = False
 
                     if not keep:
-                        # rewire edges from/to the to-be-removed node to its neighbors
+                        # If the node is removed, then rewire edges from/to the to-be-removed node to its neighbors
                         for n1 in np.where(self._Adj[i, :])[0]:
                             for n2 in np.where(self._Adj[:, i])[0]:
                                 if n1 != n2:
                                     self._Adj[n2, n1] = 1
-                else:
-                    keep = True
 
                 if keep:
                     ind_keep.append(i)
@@ -424,11 +478,12 @@ class Graph:
             ind_keep = np.array(ind_keep)
 
             if len(ind_keep) < self._Adj.shape[0]:
+                # Remove nodes and edges
                 self._Adj = self._Adj[:, ind_keep][ind_keep, :]
                 self._nodes = [self._nodes[i] for i in ind_keep]
+                n_incoming = [n_incoming[i] for i in ind_keep]
 
         return self._Adj, self._nodes
-
 
     def _add_virtual_edges(self, ve_cutoff=50):
         r"""
@@ -444,18 +499,27 @@ class Graph:
 
         # Check that the graph is connected and all nodes reach the final output
         self._nx_graph_from_adj()
-        length = nx.shortest_path(self.nx_graph, target=self.n_nodes - 1)
-        for node in range(self.n_nodes):
-            if node not in length:
-                print('WARNING: not all nodes reach the final node', node, self._nodes[node]['param_name'])
 
-        # Check that all nodes have a path to the input
-        length = nx.shortest_path(self.nx_graph, source=0)
-        for node in range(self.n_nodes):
-            if not (node in length or self._nodes[node]['param_name'].startswith('pos_enc') or
-                    self._nodes[node]['param_name'].find('pos_emb') >= 0 or
-                    self._nodes[node]['param_name'].find('position_bias') >= 0):
-                print('WARNING: not all nodes have a path to the input', node, self._nodes[node]['param_name'])
+        if self._verbose:
+            length = nx.shortest_path(self.nx_graph, target=self.n_nodes - 1)
+            for node in range(self.n_nodes):
+                if node not in length and not self._nodes[node]['param_name'].lower().startswith('aux'):
+                    print('WARNING: node={}-{} does not have a path to node={}-{}'.format(
+                        node, self._nodes[node]['param_name'], len(self._nodes) - 1, self._nodes[-1]['param_name']))
+
+            # Check that all nodes have a path to the input
+            length = nx.shortest_path(self.nx_graph, source=0)
+            for node in range(self.n_nodes):
+                if node in length:
+                    continue
+                source_name = self._nodes[0]['param_name']
+                target_name = self._nodes[node]['param_name']
+                if not (target_name.startswith('pos_enc') or
+                        target_name.find('pos_emb') >= 0 or
+                        target_name.find('position_bias') >= 0 or
+                        source_name.find('position_bias') >= 0):
+                    print('WARNING: node={}-{} does not have a path to node={}-{}'.format(
+                        0, self._nodes[0]['param_name'], node, self._nodes[node]['param_name']))
 
         if ve_cutoff > 1:
             length = dict(nx.all_pairs_shortest_path_length(self.nx_graph, cutoff=ve_cutoff))
@@ -465,7 +529,6 @@ class Graph:
                         self._Adj[node1, node2] = length[node1][node2]
             assert (self._Adj > ve_cutoff).sum() == 0, ((self._Adj > ve_cutoff).sum(), ve_cutoff)
         return self._Adj
-
 
     def _construct_features(self):
         r"""
@@ -514,11 +577,15 @@ class Graph:
 
             else:
                 ind = param_name.find('Backward')
-                name = MODULES[param_name[:len(param_name) if ind == -1 else ind]]
+                try:
+                    name = MODULES[param_name[:len(param_name) if ind == -1 else ind]]
+                except KeyError as e:
+                    name = 'sum'  # used to display redundant nodes when reduce_graph=False
+
                 n_glob_avg += int(name == 'glob_avg')
                 if self.n_cells > 1:
-                    # Add cell id to the names of pooling layers, so that they will be matched with proper modules in Network
-                    if param_name.startswith('MaxPool') or param_name.startswith('AvgPool'):
+                    # Add cell id to the names of pool layers, so that they are matched with proper modules in Network
+                    if param_name.startswith(('MaxPool', 'AvgPool')):
                         param_name = 'cells.{}.'.format(cell_ind) + name
 
             sz = None
@@ -530,7 +597,8 @@ class Graph:
                     if 'kernel_size' in attrs:
                         sz = (1, 1, *[int(a.strip('(').strip(')').strip(' ')) for a in attrs['kernel_size'].split(',')])
                     else:
-                        # Pytorch 1.9+ is required to correctly extract pooling attributes, otherwise the default pooling size of 3 is used
+                        # Pytorch 1.9+ is required to correctly extract pooling attributes,
+                        # otherwise the default pooling size of 3 is used
                         sz = (1, 1, 3, 3)
             elif node['module'] is not None:
                 sz = (node['module'].weight if param_name.find('weight') >= 0 else node['module'].bias).shape
@@ -541,25 +609,30 @@ class Graph:
                     sz_old = sz
                     s = int(np.floor(sz[1] ** 0.5))
                     sz = (1, sz[2], s, s)
-                    print(f'WARNING: setting a 4d size {sz} instead of 3d {tuple(sz_old)}')
+                    if self._verbose:
+                        print(f'WARNING: setting a 4d size {sz} instead of 3d {tuple(sz_old)}')
                 elif len(sz) == 4 and node_ind == len(self._nodes) - 2 and max(sz[2:]) == 1:
                     sz = sz[:2]
 
             self._param_shapes.append(sz)
-            self.node_feat[node_ind] = primitives_dict[name]
+            try:
+                self.node_feat[node_ind] = primitives_dict[name]
+            except KeyError as e:
+                print(f'\nError: Op/layer {name} is not present in PRIMITIVES_DEEPNETS1M={PRIMITIVES_DEEPNETS1M}. '
+                      f'You can add it there so that it is included in the graph.\n')
+                raise
+
             if node['module'] is not None or name.find('pool') >= 0 or self._list_all_nodes:
                 self.node_info[cell_ind].append(
                     [node_ind,
                      param_name if node['module'] is not None else name,
                      name,
                      sz,
-                     node_ind == len(self._nodes) - 2,
-                     node_ind == len(self._nodes) - 1])
+                     node_ind == len(self._nodes) - 2 and param_name.find('.weight') >= 0,
+                     node_ind == len(self._nodes) - 1 and param_name.find('.bias') >= 0])
 
-        if n_glob_avg != 1:
-            print(
-                'WARNING: n_glob_avg should be 1 in most architectures, but is %d in this architecture' %
-                n_glob_avg)
+        if n_glob_avg != 1 and self._verbose:
+            print(f'WARNING: n_glob_avg should be 1 in most architectures, but is {n_glob_avg} in this architecture.')
 
         self._Adj = torch.tensor(self._Adj, dtype=t_long)
 
@@ -567,11 +640,11 @@ class Graph:
         self.edges = torch.cat((ind, self._Adj[ind[:, 0], ind[:, 1]].view(-1, 1)), dim=1)
         return
 
-
     def _named_modules(self):
         r"""
         Helper function to automatically build the graphs.
-        :return:
+        :return: dictionary of named modules, where the key is the module_name.parameter_name and
+        the value is a tuple of (parameter, module)
         """
         modules = {}
         for n, m in self.model.named_modules():
@@ -584,15 +657,26 @@ class Graph:
                     continue
                 modules[key] = (p, m)
 
-        n_params = len(list(self.model.named_parameters()))
-        assert len(modules) == n_params, (len(modules), n_params)
+        n_tensors = len(list(self.model.named_parameters()))
+        params = dict(self.model.named_parameters())
+
+        if len(modules) > n_tensors:
+            if self._verbose:
+                print('WARNING: number of tensors found in all submodules ({}) > number of unique tensors ({}). '
+                      'This is fine in some models with tied weights.'.format(len(modules), n_tensors))
+                for m in modules:
+                    if m not in params:
+                        print('\t module {} ({}) not in params'.format(m, modules[m][0].shape))
+        else:
+            assert len(modules) == n_tensors, (len(modules), n_tensors)
 
         return modules
-
 
     def _nx_graph_from_adj(self, A=None, remove_ve=True):
         """
         Creates NetworkX directed graph instance that is used for visualization, virtual edges and graph statistics.
+        :param A: adjacency matrix
+        :param remove_ve: remove virtual edges from the graph (e.g. to visualize an original graph without ve)
         :return: nx.DiGraph
         """
         A = self._Adj if A is None else A
@@ -605,7 +689,6 @@ class Graph:
             A[ind] = 1. / A[ind]
         self.nx_graph = nx.DiGraph(A)
         return self.nx_graph
-
 
     def properties(self, undirected=True, key=('avg_degree', 'avg_path')):
         """
@@ -630,9 +713,8 @@ class Graph:
 
         return props
 
-
-    def visualize(self, node_size=50, figname=None, figsize=None, with_labels=False, vis_legend=False, label_offset=0.001, font_size=10,
-                  remove_ve=True):
+    def visualize(self, node_size=50, figname=None, figsize=None, with_labels=False, vis_legend=False,
+                  label_offset=0.001, font_size=10, remove_ve=True, detailed_labels=True, **nx_args):
         r"""
         Shows the graphs/legend as in the paper using matplotlib.
         :param node_size: node size
@@ -642,21 +724,24 @@ class Graph:
         :param vis_legend: True to only visualize the legend (graph will be ignored)
         :param label_offset: positioning of node labels when vis_legend=True
         :param font_size: font size for node labels, used only when with_labels=True
+        :param remove_ve: visualize with or without virtual edges (ve)
+        :param detailed_labels: use operation full names as labels, used only when with_labels=True
+        :param nx_args: extra visualization arguments passed to nx.draw
         :return:
         """
 
         import matplotlib.pyplot as plt
         from matplotlib import cm as cm
 
-        self._nx_graph_from_adj(A=self._Adj, remove_ve=remove_ve)
+        self._nx_graph_from_adj(remove_ve=remove_ve)
 
         # first are conv layers, so that they have a similar color
-        primitives_order = [2, 3, 4, 10, 5, 6, 11, 12, 13, 0, 1, 14, 7, 8, 9]
-        assert len(PRIMITIVES_DEEPNETS1M) == len(primitives_order), 'make sure the lists correspond to each other'
+        primitives_ord = [2, 3, 4, 10, 5, 6, 11, 12, 13, 0, 1, 14, 7, 8, 9]
+        assert len(PRIMITIVES_DEEPNETS1M) == len(primitives_ord), 'make sure the lists correspond to each other'
 
-        n_primitives = len(primitives_order)
-        color = lambda i: cm.jet(int(np.round(255 * i / n_primitives)))
-        primitive_colors = { PRIMITIVES_DEEPNETS1M[ind_org] : color(ind_new)  for ind_new, ind_org in enumerate(primitives_order) }
+        n_primitives = len(primitives_ord)
+        color = lambda c: cm.jet(int(np.round(255 * c / n_primitives)))
+        primitive_colors = {PRIMITIVES_DEEPNETS1M[i_org]: color(i_new) for i_new, i_org in enumerate(primitives_ord)}
         # manually adjust some colors for better visualization
         primitive_colors['bias'] = '#%02x%02x%02x' % (255, 0, 255)
         primitive_colors['msa'] = '#%02x%02x%02x' % (10, 10, 10)
@@ -667,11 +752,13 @@ class Graph:
                        'bias':      {'style': {'edgecolors': 'gray',    'linewidths': 0.5,  'node_shape': 'd'}},
                        'pos_enc':   {'style': {'edgecolors': 'gray',    'linewidths': 0.5,  'node_shape': 's'}},
                        'ln':        {'style': {'edgecolors': 'gray',    'linewidths': 0.5,  'node_shape': 's'}},
-                       'max_pool':  {'style': {'edgecolors': 'k',       'linewidths': 1,    'node_shape': 'o', 'node_size': 1.75 * node_size}},
-                       'glob_avg':  {'style': {'edgecolors': 'gray',    'linewidths': 0.5,  'node_shape': 'o', 'node_size': 2 * node_size}},
+                       'max_pool':  {'style': {'edgecolors': 'k',       'linewidths': 1,    'node_shape': 'o'}},
+                       'glob_avg':  {'style': {'edgecolors': 'gray',    'linewidths': 0.5,  'node_shape': 'o'}},
                        'concat':    {'style': {'edgecolors': 'gray',    'linewidths': 0.5,  'node_shape': '^'}},
-                       'input':     {'style': {'edgecolors': 'k',       'linewidths': 1.5,  'node_shape': 's', 'node_size': 2 * node_size}},
+                       'input':     {'style': {'edgecolors': 'k',       'linewidths': 1.5,  'node_shape': 's'}},
                        'other':     {'style': {'edgecolors': 'gray',    'linewidths': 0.5,  'node_shape': 'o'}}}
+        for group in ['glob_avg', 'input', 'max_pool']:
+            node_groups[group]['node_size'] = (1.75 if group == 'max_pool' else 2) * node_size
 
         for group in node_groups:
             node_groups[group]['node_lst'] = []
@@ -682,7 +769,7 @@ class Graph:
 
         if vis_legend:
             node_feat = torch.cat((torch.tensor([n_primitives]).view(-1, 1),
-                                   torch.tensor(primitives_order)[:, None]))
+                                   torch.tensor(primitives_ord)[:, None]))
             param_shapes = [(3, 3, 1, 1)] + [None] * n_primitives
         else:
             node_feat = self.node_feat
@@ -692,7 +779,11 @@ class Graph:
 
             name = PRIMITIVES_DEEPNETS1M[x] if x < n_primitives else 'conv'
 
-            labels[i] = self._nodes[i]['param_name'].replace('features', 'f').replace('.weight', '.w').replace('.bias', '.b')  # name[:20] if x < n_primitives else 'conv_1x1'
+            if detailed_labels:
+                labels[i] = self._nodes[i]['param_name'].replace('features', 'f').replace(
+                    '.weight', '.w').replace('.bias', '.b')
+            else:
+                labels[i] = name[:20] if x < n_primitives else 'conv_1x1'
             node_colors.append(primitive_colors[name])
 
             if name.find('conv') >= 0 and sz is not None and \
@@ -718,7 +809,8 @@ class Graph:
             nx.draw_networkx_nodes(G, pos,
                                    node_color=[node_colors[j] for j in node_group['node_lst']],
                                    nodelist=node_group['node_lst'],
-                                   **node_group['style'])
+                                   **node_group['style'],
+                                   **nx_args)
         if with_labels:
             nx.draw_networkx_labels(G, pos_labels, labels, font_size=font_size)
 
@@ -728,7 +820,8 @@ class Graph:
                                arrowsize=10,
                                alpha=0 if vis_legend else 1,
                                edge_color='white' if vis_legend else 'k',
-                               arrowstyle='-|>')
+                               arrowstyle='-|>',
+                               **nx_args)
 
         plt.grid(False)
         plt.axis('off')
@@ -739,33 +832,47 @@ class Graph:
             plt.show()
 
 
-def get_conv_name(module, param_name):
-    if param_name.find('bias') >= 0:
+def get_conv_name(module, op_name):
+    if op_name.find('bias') >= 0:
         return 'bias'
     elif isinstance(module, nn.Conv2d) and module.groups > 1:
         return 'dil_conv' if min(module.dilation) > 1 else 'sep_conv'
     return 'conv'
 
 
-# Supported modules
+# Supported modules/layers
 MODULES = {
             nn.Conv2d: get_conv_name,
-            nn.Linear: get_conv_name,
-            torch.nn.modules.linear.NonDynamicallyQuantizableLinear: get_conv_name,
-            nn.BatchNorm2d: lambda module, param_name: 'bn',
-            nn.LayerNorm: lambda module, param_name: 'ln',
-            torchvision.models.convnext.LayerNorm2d: lambda module, param_name: 'ln',
-            PosEnc: lambda module, param_name: 'pos_enc',
-            torchvision.models.vision_transformer.Encoder: lambda module, param_name: 'pos_enc',
-            torch.nn.modules.activation.MultiheadAttention: get_conv_name,
-            torchvision.models.swin_transformer.ShiftedWindowAttention: lambda module, param_name: 'pos_enc',
+            nn.Linear: get_conv_name,  # considered equal to conv1x1
+            nn.modules.linear.NonDynamicallyQuantizableLinear: get_conv_name,  # linear layer in PyTorch ViT
+            nn.modules.activation.MultiheadAttention: get_conv_name,  # linear layer in PyTorch ViT
+            transformers.pytorch_utils.Conv1D: get_conv_name,  # for huggingface layers
+            nn.BatchNorm2d: lambda module, op_name: 'bn',
+            nn.LayerNorm: lambda module, op_name: 'ln',
+            models.convnext.LayerNorm2d: lambda module, op_name: 'ln',  # using a separate op (e.g. ln2) could be better
+            # We use pos_enc to denote any kind of embedding, which is not the best option
+            # Consider adding separate node types (e.g. 'embed') to differentiate between embedding layers
+            ops.PosEnc: lambda module, op_name: 'pos_enc',
+            nn.modules.sparse.Embedding: lambda module, op_name: 'pos_enc',
+            models.vision_transformer.Encoder: lambda module, op_name: 'pos_enc',  # positional encoding in PyTorch ViTs
             'input': 'input',
             'Mean': 'glob_avg',
             'AdaptiveAvgPool2D': 'glob_avg',
             'MaxPool2DWithIndices': 'max_pool',
             'AvgPool2D': 'avg_pool',
-            'Softmax': 'msa',
-            'Mul': 'cse',
+            'Softmax': 'msa',  # multi-head self-attention
+            'Mul': 'cse',  # ChannelSELayer
             'Add': 'sum',
             'Cat': 'concat',
-        }
+            'skip_connect': 'sum',  # used to display redundant nodes when reduce_graph=False
+
+            # Adding non-linearities and other layers to the graph is possible as shown below,
+            #  but requires adding them in ppuda.deepnets1m.genotypes.PRIMITIVES_DEEPNETS1M:
+            # torchvision.models.swin_transformer.ShiftedWindowAttention: lambda module, op_name: 'pos_enc',
+            # torchvision.models.convnext.CNBlock: lambda module, op_name: 'layer_scale',
+            # 'Gelu': 'gelu',
+            # 'Relu': 'relu',
+
+            # Sometimes, existing primitives can be re-used for new operations as we do for
+            # models.convnext.LayerNorm2d, however this may be suboptimal compared to introducing a separate op
+}

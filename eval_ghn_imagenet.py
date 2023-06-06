@@ -1,20 +1,12 @@
+# Copyright (c) 2023. Samsung Electronics Co., Ltd. All Rights Reserved.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Evaluates a GHN on all PyTorch models on ImageNet.
-
-This script assumes the ImageNet dataset is already downloaded and stored at $SOME_DIR_TO_IMAGENET.
-Assuming a GPU cluster node with $SLURM_TMPDIR as the data folder, a typical ImageNet data preparation is the following:
-    ```
-    cd $SLURM_TMPDIR;
-    mkdir imagenet
-    cd imagenet
-    mkdir train
-    echo "setting up imagenet data (can take a few minutes)..."
-    tar -xf $SOME_DIR_TO_IMAGENET/ILSVRC2012_img_train.tar -C train/
-    cd train
-    for i in *.tar; do dir=${i%.tar}; mkdir -p $dir; tar xf $i -C $dir; done
-    cp -r $SOME_DIR_TO_IMAGENET/val "$SLURM_TMPDIR/imagenet/"  # copy all validation images
-    cp $SOME_DIR_TO_IMAGENET/ILSVRC2012_devkit_t12.tar.gz "$SLURM_TMPDIR/imagenet/";
-    ```
+This script assumes the ImageNet dataset is already downloaded and set up as described in scripts/imagenet_setup.sh
 
 Example:
 
@@ -103,6 +95,8 @@ for m_ind, m in enumerate(all_torch_models):
                                                            len(all_torch_models),
                                                            m.upper(),
                                                            n_params), end='...')
+        if args.device != 'cpu':
+            torch.cuda.synchronize()
         start = time.time()
 
         with torch.no_grad():  # to improve efficiency
@@ -119,7 +113,11 @@ for m_ind, m in enumerate(all_torch_models):
 
         print('Running evaluation for %s...' % m)
         val_loader.sampler.generator.manual_seed(args.seed)  # set the generator seed to reproduce results
-        top1, top5 = infer(model.to(args.device), val_loader, verbose=True)
+
+        start = time.time()
+        top1, top5 = infer(model.to(args.device), val_loader, verbose=False)
+        print('\ntesting: top1={:.3f}, top5={:.3f} ({} eval samples, time={:.2f} seconds)'.format(
+            top1, top5, val_loader.dataset.num_examples, time.time() - start), flush=True)
         top1_all.update(top1, 1)
     except Exception as e:
         print('ERROR for model %s: %s' % (m, e))

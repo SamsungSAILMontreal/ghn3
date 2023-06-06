@@ -1,5 +1,15 @@
-# Adjusted graph.py to support graph construction of all PyTorch models
-# based on https://github.com/facebookresearch/ppuda/blob/main/ppuda/deepnets1m/graph.py
+# Copyright (c) 2023. Samsung Electronics Co., Ltd. All Rights Reserved.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""
+Containers for computational graphs.
+Adjusted code from https://github.com/facebookresearch/ppuda/blob/main/ppuda/deepnets1m/graph.py to support
+graph construction of more PyTorch models.
+
+"""
 
 
 import numpy as np

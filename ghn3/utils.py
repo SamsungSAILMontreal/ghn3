@@ -1,3 +1,15 @@
+# Copyright (c) 2023. Samsung Electronics Co., Ltd. All Rights Reserved.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""
+Utils.
+
+"""
+
+
 import os
 import gc
 import time
@@ -153,14 +165,27 @@ def clean_ddp():
     time.sleep(10)
 
 
+def avg_ddp_metric(metric):
+    """
+    Computes average metric value gathered from workers.
+    :param metric: input tensor
+    :return: averaged tensor
+    """
+    lst = [torch.zeros_like(metric) for _ in range(dist.get_world_size())]
+    dist.all_gather(lst, metric)
+    avg = torch.stack(lst).mean().view_as(metric)
+    return avg
+
+
 def log(s, *args, **kwargs):
     if get_ddp_rank() == 0:
         print(s, *args, **kwargs)
 
 
 class Logger:
-    def __init__(self, max_steps):
+    def __init__(self, max_steps, start_step=0):
         self.max_steps = max_steps
+        self.start_step = start_step
         self.is_cuda = torch.cuda.is_available()
         if self.is_cuda:
             torch.cuda.synchronize()
@@ -173,7 +198,54 @@ class Logger:
         log('batch={:04d}/{:04d} \t {} \t {:.4f} (sec/batch), mem ram/gpu: {:.2f}/{} (G)'.
             format(step, self.max_steps,
                    '\t'.join(['{}={:.4f}'.format(m, v) for m, v in metrics_dict.items()]),
-                   (time.time() - self.start_time) / max(1, (step + 1)),
+                   (time.time() - self.start_time) / max(1, (step + 1 - self.start_step)),
                    process.memory_info().rss / 10 ** 9,
                    ('%.2f' % (torch.cuda.memory_reserved(0) / 10 ** 9)) if self.is_cuda else 'nan'),
             flush=True)
+
+
+def print_grads(model, verbose=True):
+
+    grads_table, norms_table = {}, {}
+
+    if verbose:
+        print('\n ======== gradient and param norms (sorted by grads) ========')
+    norm_type = 2
+    grads, norms, shapes = {}, {}, {}
+    for i, (n, p) in enumerate(model.named_parameters()):
+        if p.grad is not None:
+            assert n not in grads, (n, grads)
+            grads[n] = torch.norm(p.grad.detach(), norm_type)
+            norms[n] = p.norm()
+            shapes[n] = p.shape
+
+    names = sorted(grads, key=lambda x: grads[x])
+    for i, n in enumerate(names):
+        if n in grads_table:
+            delta_grad = (grads[n].item() - grads_table[n])
+            delta_norm = (norms[n].item() - norms_table[n])
+        else:
+            delta_grad = delta_norm = 0
+        grads_table[n] = grads[n].item()
+        norms_table[n] = norms[n].item()
+        if verbose:
+            print(
+                'param #{:03d}: {:35s}: \t shape={:20s}, \t grad norm={:.3f} (d={:.3f}), '
+                '\t param norm={:.3f} (d={:.3f})'.format(
+                    i,
+                    '%35s' % n,
+                    str(tuple(shapes[n])),
+                    grads_table[n],
+                    delta_grad,
+                    norms[n],
+                    delta_norm))
+
+    grads = torch.stack(list(grads.values()))
+    assert len(grads_table) == len(norms_table) == len(grads), (len(grads_table), len(norms_table), len(grads))
+    total_grad_norm = torch.norm(grads, norm_type)
+    total_norm = torch.norm(torch.stack(list(norms.values())), norm_type)
+    print('{} params with gradients, total grad norm={:.3f}, total param norm={:.3f}\n'.format(
+        tuple(grads.shape),
+        total_grad_norm.item(),
+        total_norm.item()))
+    return

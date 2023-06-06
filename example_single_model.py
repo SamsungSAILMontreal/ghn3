@@ -1,11 +1,18 @@
+# Copyright (c) 2023. Samsung Electronics Co., Ltd. All Rights Reserved.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
-Predict parameters of a PyTorch model using one of the pretrained GHNs.
+Predicts parameters of a PyTorch model using one of the pretrained GHNs.
 
 Example (use --debug 1 to perform additional sanity checks and print more information):
 
     python example_single_model.py --ckpt ghn3tm8.pt --arch resnet50 --debug 0
 
 """
+
 
 import torch
 import torchvision

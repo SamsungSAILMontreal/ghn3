@@ -1,3 +1,15 @@
+# Copyright (c) 2023. Samsung Electronics Co., Ltd. All Rights Reserved.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""
+GHN-3 code.
+
+"""
+
+
 import json
 import torch
 import torch.nn as nn
@@ -12,7 +24,7 @@ from ppuda.deepnets1m.ops import PosEnc, NormLayers
 from ppuda.ghn.nn import GHN, ShapeEncoder, ConvDecoder
 from ppuda.utils import capacity
 from .graph import Graph, GraphBatch
-from huggingface_hub import hf_hub_download, cached_download
+from huggingface_hub import hf_hub_download
 from .utils import named_layered_modules, log
 
 
@@ -89,174 +101,18 @@ def from_pretrained(ghn3_name='ghn3xlm16.pt', **kwargs):
     return ghn
 
 
-def norm_check(model, arch='resnet50', ghn3_name='ghn3xlm16.pt'):
-    total_norm = torch.norm(torch.stack([p.norm() for p in model.parameters()]), 2).item()
-    norm = get_metadata(ghn3_name, arch=arch, attr='paramnorm')
-    log('Predicted params total norm={:.4f} ({})'.
-        format(total_norm,
-               ('check passed!' if abs(norm - total_norm) < 1e-2 else
-                ('ERROR: norm check not matched with %.2f' % norm)) if norm else 'no norm check available'))
-    # This error can be fine if the model has some parameters not predicted by the GHN and initialized randomly instead.
-
-
-def get_metadata(ghn3_name='ghn3xlm16.pt', arch=None, attr=None):
-
-    if ghn3_name is not None:
-        if ghn3_name == 'ghn3xlm16.pt':
-            key = 'ghn3'
-        elif ghn3_name == 'ghn3tm8.pt':
-            key = 'ghn3-t'
-        elif ghn3_name == 'ghn2.pt':
-            key = 'ghn2'
-        elif ghn3_name == 'randinit':
-            key = 'randinit'
-        else:
-            log('WARNING: meta data not unavailable for %s' % ghn3_name)
-            return None
-
-    cache_file = hf_hub_download(repo_id='SamsungSAILMontreal/ghn3', filename='ghn3_results.json')
-    with open(cache_file, 'rb') as f:
-        # md5 check to make sure the file is not corrupted
-        assert hashlib.md5(f.read()).hexdigest() == 'bb703997a56fa7f5359c8e6142524e72', 'corrupted ghn3_results.json'
-
-    with open(cache_file, 'r') as f:
-        # same file as https://github.com/SamsungSAILMontreal/ghn3/blob/main/ghn3_results.json
-        meta_data = json.load(f)
-
-    if ghn3_name is None:
-        return meta_data
-
-    meta_data_filtered = {}
-    for a in meta_data:
-        meta_data_filtered[a] = {}
-        for k in meta_data[a]:
-            if k.startswith('ghn3-t') and key == 'ghn3':
-                continue
-            if k.startswith(key):
-                meta_data_filtered[a][k.split('-')[-1]] = float(meta_data[a][k])
-
-    if arch is not None:
-        meta_data_filtered = meta_data_filtered[arch]
-        if attr is not None:
-            meta_data_filtered = meta_data_filtered[attr]
-    elif attr is not None:
-        meta_data_filtered = {arch: meta_data_filtered[arch][attr] for arch in meta_data_filtered}
-
-    return meta_data_filtered
-
-
-class ShapeEncoder3(ShapeEncoder):
-    """
-    Updated ShapeEncoder to support more different PyTorch models.
-    """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def forward(self, x, params_map, predict_class_layers=True):
-        shape_ind = self.dummy_ind.repeat(len(x), 1)
-
-        self.printed_warning = False
-        for node_ind in params_map:
-            sz = params_map[node_ind][0]['sz']
-            if sz is None:
-                continue
-
-            sz_org = sz
-            if len(sz) == 1:
-                sz = (sz[0], 1)
-            if len(sz) == 2:
-                sz = (sz[0], sz[1], 1, 1)
-            if len(sz) == 3:
-                # Special treatment of 3D weights for some models like ViT.
-                if sz[0] == 1 and min(sz[1:]) > 1:  # e.g. [1, 197, 768]
-                    s = int(np.floor(sz[1] ** 0.5))
-                    sz = (1, sz[2], s, s)
-                else:
-                    sz = (sz[0], sz[1], sz[2], 1)
-
-            assert len(sz) == 4, sz
-
-            if not predict_class_layers and params_map[node_ind][1] in ['cls_w', 'cls_b']:
-                # keep the classification shape as though the GHN is used on the dataset it was trained on
-                sz = (self.num_classes, *sz[1:])
-
-            recognized_sz = 0
-            for i in range(4):
-                # if not in the dictionary, then use the maximum shape
-                if i < 2:  # for out/in channel dimensions
-                    shape_ind[node_ind, i] = self.channels_lookup[
-                        sz[i] if sz[i] in self.channels_lookup else self.channels[-1]]
-                    if self.debug_level and not self.printed_warning:
-                        recognized_sz += int(sz[i] in self.channels_lookup_training)
-                else:  # for kernel height/width
-                    shape_ind[node_ind, i] = self.spatial_lookup[
-                        sz[i] if sz[i] in self.spatial_lookup else self.spatial[-1]]
-                    if self.debug_level and not self.printed_warning:
-                        recognized_sz += int(sz[i] in self.spatial_lookup_training)
-
-            if self.debug_level and not self.printed_warning:  # print a warning once per architecture
-                if recognized_sz != 4:
-                    print('WARNING: unrecognized shape %s, so the closest shape at index %s will be used instead.' % (
-                        sz_org, ([self.channels[c.item()] if i < 2 else self.spatial[c.item()] for i, c in
-                                  enumerate(shape_ind[node_ind])])))
-                    self.printed_warning = True
-
-        shape_embed = torch.cat(
-            (self.embed_channel(shape_ind[:, 0]),
-             self.embed_channel(shape_ind[:, 1]),
-             self.embed_spatial(shape_ind[:, 2]),
-             self.embed_spatial(shape_ind[:, 3])), dim=1)
-
-        return x + shape_embed
-
-
-class ConvDecoder3(ConvDecoder):
-    """
-    Updated ConvDecoder with small changes for GHN-3 (specifically, using spatial offsets for generating weights).
-    nn.Linear is used instead of nn.Conv2d to help to resolve some mysterious RuntimeError CUDA errors.
-    """
-    def __init__(self, is_ghn2=False, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._is_ghn2 = is_ghn2
-        for dec_layer in [0, 2]:
-            conv = self.conv[dec_layer]
-            self.conv[dec_layer] = torch.nn.Linear(conv.weight.shape[1], conv.weight.shape[0])
-        dec_layer = 1
-        conv = self.class_layer_predictor[dec_layer]
-        self.class_layer_predictor[dec_layer] = torch.nn.Linear(conv.weight.shape[1],
-                                                                conv.weight.shape[0])
-
-    def forward(self, x, max_shape=(1, 1, 1, 1), class_pred=False):
-
-        N = x.shape[0]
-        x = self.fc(x).view(N, -1, *self.out_shape[2:])
-        if self._is_ghn2:
-            x = x[:, :, :max_shape[2], :max_shape[3]]
-        else:
-            offset = self.out_shape[2] // 2
-            x = x[:, :,
-                  max(0, offset - max_shape[2] // 2): offset + int(np.ceil(max_shape[2] / 2)),
-                  max(0, offset - max_shape[3] // 2): offset + int(np.ceil(max_shape[3] / 2))]
-
-        out_shape = (*self.out_shape[:2], min(self.out_shape[2], max_shape[2]), min(self.out_shape[3], max_shape[3]))
-        x = self.conv(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        x = x.reshape(N, out_shape[0], out_shape[1], *out_shape[2:])
-        x = x[:, :, :max_shape[1], :max_shape[2], :max_shape[3]]
-        if min(max_shape[2:]) > min(out_shape[2:]):
-            assert x.shape[0] == 1, x.shape
-            x = F.interpolate(x[0], max_shape[2:], mode='bilinear').unsqueeze(0)
-
-        if class_pred:
-            assert x.shape[-2] == x.shape[-1], ('require squared weights at this point', x.shape)
-            k = x.shape[-1] // 2
-            x = self.class_layer_predictor(x[:, :, :, k, k].permute(0, 2, 1)).permute(0, 2, 1)  # N, num_classes, in
-        else:
-            x = x[:, :max_shape[0]]
-
-        return x
-
-
 class GHN3(GHN):
+    r"""
+    Improved Transformer-based Graph HyperNetwork (GHN-3) based on the paper
+    "Can We Scale Transformers to Predict Parameters of Diverse ImageNet Models?"
+    (https://arxiv.org/abs/2303.04143)
+
+    The key improvement is the usage of GraphormerLayers.
+
+    Inherited from the GHN class (https://github.com/facebookresearch/ppuda/blob/main/ppuda/ghn/nn.py).
+    But most of the functions are overridden to support GHN-3 and improve code.
+
+    """
     def __init__(self, max_shape, num_classes, hid, heads, layers, is_ghn2=False, **kwargs):
         super().__init__(max_shape, num_classes, hid=hid, **kwargs)
         self._is_ghn2 = is_ghn2
@@ -781,9 +637,131 @@ class GHN3(GHN):
         return
 
 
-# Graphormer-based layer blocks
+class ShapeEncoder3(ShapeEncoder):
+    r"""
+    Updated ShapeEncoder of GHN-2 to support more different PyTorch models.
+
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def forward(self, x, params_map, predict_class_layers=True):
+        shape_ind = self.dummy_ind.repeat(len(x), 1)
+
+        self.printed_warning = False
+        for node_ind in params_map:
+            sz = params_map[node_ind][0]['sz']
+            if sz is None:
+                continue
+
+            sz_org = sz
+            if len(sz) == 1:
+                sz = (sz[0], 1)
+            if len(sz) == 2:
+                sz = (sz[0], sz[1], 1, 1)
+            if len(sz) == 3:
+                # Special treatment of 3D weights for some models like ViT.
+                if sz[0] == 1 and min(sz[1:]) > 1:  # e.g. [1, 197, 768]
+                    s = int(np.floor(sz[1] ** 0.5))
+                    sz = (1, sz[2], s, s)
+                else:
+                    sz = (sz[0], sz[1], sz[2], 1)
+
+            assert len(sz) == 4, sz
+
+            if not predict_class_layers and params_map[node_ind][1] in ['cls_w', 'cls_b']:
+                # keep the classification shape as though the GHN is used on the dataset it was trained on
+                sz = (self.num_classes, *sz[1:])
+
+            recognized_sz = 0
+            for i in range(4):
+                # if not in the dictionary, then use the maximum shape
+                if i < 2:  # for out/in channel dimensions
+                    shape_ind[node_ind, i] = self.channels_lookup[
+                        sz[i] if sz[i] in self.channels_lookup else self.channels[-1]]
+                    if self.debug_level and not self.printed_warning:
+                        recognized_sz += int(sz[i] in self.channels_lookup_training)
+                else:  # for kernel height/width
+                    shape_ind[node_ind, i] = self.spatial_lookup[
+                        sz[i] if sz[i] in self.spatial_lookup else self.spatial[-1]]
+                    if self.debug_level and not self.printed_warning:
+                        recognized_sz += int(sz[i] in self.spatial_lookup_training)
+
+            if self.debug_level and not self.printed_warning:  # print a warning once per architecture
+                if recognized_sz != 4:
+                    print('WARNING: unrecognized shape %s, so the closest shape at index %s will be used instead.' % (
+                        sz_org, ([self.channels[c.item()] if i < 2 else self.spatial[c.item()] for i, c in
+                                  enumerate(shape_ind[node_ind])])))
+                    self.printed_warning = True
+
+        shape_embed = torch.cat(
+            (self.embed_channel(shape_ind[:, 0]),
+             self.embed_channel(shape_ind[:, 1]),
+             self.embed_spatial(shape_ind[:, 2]),
+             self.embed_spatial(shape_ind[:, 3])), dim=1)
+
+        return x + shape_embed
+
+
+class ConvDecoder3(ConvDecoder):
+    """
+    Updated ConvDecoder of GHN-2 with small changes for GHN-3 (specifically, using spatial offsets for generating higher
+     quality weights).
+     Also, nn.Linear is used instead of nn.Conv2d to help to resolve some mysterious RuntimeError CUDA errors on A100.
+
+    """
+    def __init__(self, is_ghn2=False, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._is_ghn2 = is_ghn2
+        for dec_layer in [0, 2]:
+            conv = self.conv[dec_layer]
+            self.conv[dec_layer] = torch.nn.Linear(conv.weight.shape[1], conv.weight.shape[0])
+        dec_layer = 1
+        conv = self.class_layer_predictor[dec_layer]
+        self.class_layer_predictor[dec_layer] = torch.nn.Linear(conv.weight.shape[1],
+                                                                conv.weight.shape[0])
+
+    def forward(self, x, max_shape=(1, 1, 1, 1), class_pred=False):
+
+        N = x.shape[0]
+        x = self.fc(x).view(N, -1, *self.out_shape[2:])
+        if self._is_ghn2:
+            x = x[:, :, :max_shape[2], :max_shape[3]]
+        else:
+            offset = self.out_shape[2] // 2
+            x = x[:, :,
+                  max(0, offset - max_shape[2] // 2): offset + int(np.ceil(max_shape[2] / 2)),
+                  max(0, offset - max_shape[3] // 2): offset + int(np.ceil(max_shape[3] / 2))]
+
+        out_shape = (*self.out_shape[:2], min(self.out_shape[2], max_shape[2]), min(self.out_shape[3], max_shape[3]))
+        x = self.conv(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        x = x.reshape(N, out_shape[0], out_shape[1], *out_shape[2:])
+        x = x[:, :, :max_shape[1], :max_shape[2], :max_shape[3]]
+        if min(max_shape[2:]) > min(out_shape[2:]):
+            assert x.shape[0] == 1, x.shape
+            x = F.interpolate(x[0], max_shape[2:], mode='bilinear').unsqueeze(0)
+
+        if class_pred:
+            assert x.shape[-2] == x.shape[-1], ('require squared weights at this point', x.shape)
+            k = x.shape[-1] // 2
+            x = self.class_layer_predictor(x[:, :, :, k, k].permute(0, 2, 1)).permute(0, 2, 1)  # N, num_classes, in
+        else:
+            x = x[:, :max_shape[0]]
+
+        return x
+
+
+""" 
+Graphormer-based layers.
+
+"""
+
 
 class FeedForward(nn.Module):
+    """
+    Standard MLP applied after each self-attention in Transformer layers.
+
+    """
     def __init__(self, in_features,
                  hidden_features=None,
                  out_features=None,
@@ -807,16 +785,19 @@ class FeedForward(nn.Module):
 
 
 class EdgeEmbedding(nn.Module):
-    def __init__(self, C, max_len=5000):
+    """
+    Simple embedding layer that learns a separate embedding for each edge value (e.g. 0 and 1 for binary edges).
+
+    """
+    def __init__(self, hid, max_len=5000):
         super().__init__()
         # Based on positional encoding in original Transformers (Attention is All You Need)
-        self.C = C
         position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, C, 2) * (-math.log(10000.0) / C))
-        pe = torch.zeros(max_len, C)  # first dim is batch
+        div_term = torch.exp(torch.arange(0, hid, 2) * (-math.log(10000.0) / hid))
+        pe = torch.zeros(max_len, hid)  # first dim is batch
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.embed = nn.Embedding(max_len, C)
+        self.embed = nn.Embedding(max_len, hid)
         self.embed.weight.data = pe
 
     def forward(self, x):
@@ -824,7 +805,15 @@ class EdgeEmbedding(nn.Module):
 
 
 class MultiHeadSelfAttentionEdges(nn.Module):
-    def __init__(self, dim, edge_dim=1, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
+    """
+    Multi-head self-attention layer with edge embeddings.
+
+    When edge_dim=0, this is a standard multi-head self-attention layer.
+    However, the edge features produced by the first MultiHeadSelfAttentionEdges layer are propagated
+    to the subsequent layers.
+
+    """
+    def __init__(self, dim, edge_dim=0, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
         super().__init__()
 
         self.num_heads = num_heads
@@ -845,37 +834,58 @@ class MultiHeadSelfAttentionEdges(nn.Module):
                                         nn.ReLU(),
                                         nn.Linear(dim, num_heads))
 
-            # the embedding layers below will be copied from the parent module
+            # the embedding layers below will be copied from the parent module (see the from_pretrained function)
             # self.centrality_embed_in = nn.Embedding(self.max_degree + 1, dim)
             # self.centrality_embed_out = nn.Embedding(self.max_degree + 1, dim)
             # self.input_dist_embed = nn.Embedding(self.max_input_dist + 1, dim)
 
     def forward(self, x, edges, mask=None):
+        """
+        MultiHeadSelfAttentionEdges forward pass.
+        :param x: node features of the shape (B, N, C).
+        :param edges: edges of shape (B, N, N, 2), where 2 is due to concatenating forward and backward edges.
+        :param mask: mask of shape (B, N, N) with zeros for zero-padded edges and ones otherwise.
+        :return: x of shape (B, N, C) and edges of shape (B, N, N, h),
+        where h is the number of self-attention heads (8 by default).
+
+        edges are propagated to the next layer, but are not going to be updated in the subsequent layers.
+
+        """
 
         if self.edge_dim > 0:
-            edges = self.edge_embed(edges)
-            edges = edges.reshape(*edges.shape[:-2], -1)
-            edges = self.proj_e(edges)
+            edges = self.edge_embed(edges)  # (B, N, N, 2) -> (B, N, N, 2, dim)
+            edges = edges.reshape(*edges.shape[:-2], -1)  # (B, N, N, 2, dim) -> (B, N, N, 2*dim)
+            edges = self.proj_e(edges)  # (B, N, N, 2*dim) -> (B, N, N, 8) -- 8 is the number of heads by default
 
+        # standard multi-head self-attention
         B, N, C = x.shape
         qkv = self.to_qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
+
+        # attention matrix attn is going to be of shape (B, 8, N, N),
+        # so we permute the edges (B, N, N, 8) to (B, 8, N, N) before summing up them with attn
+        # this operation results in the edge-aware attention matrix that is used to update node features
         attn = (q @ k.transpose(-2, -1)) * self.scale + edges.permute(0, 3, 1, 2)
 
         if mask is not None:
+            # Zero-out attention values corresponding to zero-padded edges/nodes
             # based on https://discuss.pytorch.org/t/apply-mask-softmax/14212/25
-            # print('attn shape', attn.shape, 'mask shape', mask.shape)
             attn = attn.masked_fill(~mask.unsqueeze(1), -2 ** 15)  # 2**15 to work with amp
 
+        # standard steps of self-attention layers
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.to_out(x)
-
         return x, edges
 
 
 class SequentialMultipleInOut(nn.Sequential):
+    """
+    Wrapper to build a sequence of GraphormerLayers with multiple inputs.
+
+    """
+
     def __init__(self, *args):
         super().__init__(*args)
 
@@ -889,8 +899,44 @@ class SequentialMultipleInOut(nn.Sequential):
 
 
 class GraphormerLayer(nn.Module):
-    def __init__(self, dim, edge_dim=0, num_heads=8, mlp_ratio=4, qkv_bias=False, act_layer=nn.GELU, eps=1e-5,
+    """
+    Graphormer layer taking node features x (B, N, C), directed graph edges (B, N, N) and mask (B, N, N) as inputs.
+    B is a batch size corresponding to multiple architectures (for evaluation B=1).
+    N is the maximum number of nodes in the batch of graphs.
+    C is the dimension of the node features (dim).
+
+    x are node features (e.g. produced by an embedding layer).
+    We further augment x with centrality in/out and input_dist embeddings to enrich them with the graph structure.
+    To correctly compute input_dist, edges must contain the shortest path distances b/w nodes as described below.
+
+    edges is an adjacency matrix with values from 0 to 255. 0 means no edge, while values > 0 are edge distances.
+    In a simple case, edges can be a binary matrix indicating which nodes are connected (1) and which are not (0).
+    In GHN-3 we follow GHN-2 and use the shortest path distances (1, 2, 3, ...) between pairs of nodes as edge values.
+    Note that edges are directed (correspond to the forward pass direction), so the edges matrix is upper triangular.
+
+    mask is a binary mask indicating which nodes are valid (1) and which are zero-padded (0).
+    """
+    def __init__(self,
+                 dim,
+                 edge_dim=0,
+                 num_heads=8,
+                 mlp_ratio=4,
+                 qkv_bias=False,
+                 act_layer=nn.GELU,
+                 eps=1e-5,
                  return_edges=True):
+        """
+
+        :param dim: hidden size.
+        :param edge_dim: GHN-3 only the first Graphormer layer has edge_dim>0 (we use edge_dim=2).
+        For all other layers edge_dim=0, which corresponds to the vanilla Transformer layer.
+        :param num_heads: number of attention heads.
+        :param mlp_ratio: ratio of mlp hidden dim to embedding dim.
+        :param qkv_bias: whether to add bias to qkv projection.
+        :param act_layer: activation layer.
+        :param eps: layer norm eps.
+        :param return_edges: whether to return edges (for GHN-3 all but the last Graphormer layer returns edges).
+        """
         super().__init__()
 
         self.return_edges = return_edges
@@ -937,3 +983,74 @@ class GraphormerLayer(nn.Module):
         x = x + self.ff(self.ln2(x))
 
         return (x, edges, mask) if self.return_edges else x.reshape(B * N, C)
+
+
+def norm_check(model, arch='resnet50', ghn3_name='ghn3xlm16.pt'):
+    """
+    Sanity check to make sure GHN works correctly.
+    :param model: PyTorch model.
+    :param arch: name of the architecture.
+    :param ghn3_name: name of the GHN model.
+    :return:
+    """
+    total_norm = torch.norm(torch.stack([p.norm() for p in model.parameters()]), 2).item()
+    norm = get_metadata(ghn3_name, arch=arch, attr='paramnorm')
+    log('Predicted params total norm={:.4f} ({})'.
+        format(total_norm,
+               ('check passed!' if abs(norm - total_norm) < 1e-2 else
+                ('ERROR: norm check not matched with %.2f' % norm)) if norm else 'no norm check available'))
+    # This error can be fine if the model has some parameters not predicted by the GHN and initialized randomly instead.
+
+
+def get_metadata(ghn3_name='ghn3xlm16.pt', arch=None, attr=None):
+    """
+    Get metadata for the GHN models (for sanity checks) by reading the json file
+    from https://huggingface.co/SamsungSAILMontreal/ghn3/blob/main/ghn3_results.json.
+    Note that the same file is also located at https://github.com/SamsungSAILMontreal/ghn3/blob/main/ghn3_results.json.
+    :param ghn3_name:
+    :param arch:
+    :param attr:
+    :return:
+    """
+    if ghn3_name is not None:
+        if ghn3_name == 'ghn3xlm16.pt':
+            key = 'ghn3'
+        elif ghn3_name == 'ghn3tm8.pt':
+            key = 'ghn3-t'
+        elif ghn3_name == 'ghn2.pt':
+            key = 'ghn2'
+        elif ghn3_name == 'randinit':
+            key = 'randinit'
+        else:
+            log('WARNING: meta data not unavailable for %s' % ghn3_name)
+            return None
+
+    cache_file = hf_hub_download(repo_id='SamsungSAILMontreal/ghn3', filename='ghn3_results.json')
+    with open(cache_file, 'rb') as f:
+        # md5 check to make sure the file is not corrupted
+        assert hashlib.md5(f.read()).hexdigest() == 'bb703997a56fa7f5359c8e6142524e72', 'corrupted ghn3_results.json'
+
+    with open(cache_file, 'r') as f:
+        # same file as https://github.com/SamsungSAILMontreal/ghn3/blob/main/ghn3_results.json
+        meta_data = json.load(f)
+
+    if ghn3_name is None:
+        return meta_data
+
+    meta_data_filtered = {}
+    for a in meta_data:
+        meta_data_filtered[a] = {}
+        for k in meta_data[a]:
+            if k.startswith('ghn3-t') and key == 'ghn3':
+                continue
+            if k.startswith(key):
+                meta_data_filtered[a][k.split('-')[-1]] = float(meta_data[a][k])
+
+    if arch is not None:
+        meta_data_filtered = meta_data_filtered[arch]
+        if attr is not None:
+            meta_data_filtered = meta_data_filtered[attr]
+    elif attr is not None:
+        meta_data_filtered = {arch: meta_data_filtered[arch][attr] for arch in meta_data_filtered}
+
+    return meta_data_filtered

@@ -4,16 +4,18 @@
 
 import numpy as np
 import copy
+import heapq
 import torch
 import torch.nn as nn
 import networkx as nx
 import transformers
 import torchvision
 import torchvision.models as models
+import torch.nn.functional as F
 import ppuda.deepnets1m.ops as ops
+from torch.nn.parallel.scatter_gather import Scatter as _scatter
 from ppuda.deepnets1m.net import get_cell_ind
 from ppuda.deepnets1m.genotypes import PRIMITIVES_DEEPNETS1M
-from ppuda.deepnets1m.graph import GraphBatch
 from .utils import named_layered_modules
 
 
@@ -21,6 +23,246 @@ import sys
 sys.setrecursionlimit(10000)  # for large models like efficientnet_v2_l
 
 t_long = torch.long
+
+
+class GraphBatch:
+    r"""
+    Container for a batch of Graph objects.
+
+    Example:
+
+        batch = GraphBatch([Graph(torchvision.models.resnet50())])
+
+    """
+
+    def __init__(self, graphs, dense=False):
+        r"""
+        :param graphs: iterable, where each item is a Graph object.
+        :param dense: create dense node and adjacency matrices (e.g. for transformer)
+        """
+        self.n_nodes, self.node_feat, self.node_info, self.edges, self.net_args, self.net_inds = [], [], [], [], [], []
+        self._n_edges = []
+        self.graphs = graphs
+        self.dense = dense
+        if self.dense:
+            self.mask = []
+
+        if graphs is not None:
+            if not isinstance(graphs, (list, tuple)):
+                graphs = [graphs]
+            for graph in graphs:
+                self.append(graph)
+
+    def append(self, graph):
+        graph_offset = len(self.n_nodes)                    # current index of the graph in a batch
+        self.n_nodes.append(len(graph.node_feat))           # number of nodes
+
+        if self.dense:
+            self.node_feat.append(graph.node_feat)
+            self.edges.append(graph._Adj)
+        else:
+            self._n_edges.append(len(graph.edges))              # number of edges
+            self.node_feat.append(torch.cat((graph.node_feat,   # primitive type
+                                             graph_offset + torch.zeros(len(graph.node_feat), 1, dtype=torch.long)),
+                                            dim=1))             # graph index for each node
+            self.edges.append(torch.cat((graph.edges,
+                                         graph_offset + torch.zeros(len(graph.edges), 1, dtype=torch.long)),
+                                        dim=1))                 # graph index for each edge
+
+        self.node_info.append(graph.node_info)      # op names, ids, etc.
+        self.net_args.append(graph.net_args)        # a dictionary of arguments to construct a Network object
+        self.net_inds.append(graph.net_idx)         # network integer identifier (optional)
+
+    def scatter(self, device_ids, nets):
+        """
+        Distributes the batch of graphs and networks to multiple CUDA devices.
+        :param device_ids: list of CUDA devices
+        :param nets: list of networks
+        :return: list of tuples of networks and corresponding graphs
+        """
+        n_graphs = len(self.n_nodes)  # number of graphs in a batch
+        gpd = int(np.ceil(n_graphs / len(device_ids)))  # number of graphs per device
+
+        if len(device_ids) > 1:
+            sorted_idx = self._sort_by_nodes(len(device_ids), gpd)
+            nets = [nets[i] for i in sorted_idx]
+
+        chunks_iter = np.arange(0, n_graphs, gpd)
+        n_nodes_chunks = [len(self.n_nodes[i:i + gpd]) for i in chunks_iter]
+        if self.dense:
+            if not isinstance(self.n_nodes, torch.Tensor):
+                self.n_nodes = torch.tensor(self.n_nodes, dtype=t_long)
+            self.n_nodes = _scatter.apply(device_ids, n_nodes_chunks, 0, self.n_nodes)
+        else:
+            node_chunks = [sum(self.n_nodes[i:i + gpd]) for i in chunks_iter]
+            edge_chunks = [sum(self._n_edges[i:i + gpd]) for i in chunks_iter]
+            self._cat()
+            self.node_feat = _scatter.apply(device_ids, node_chunks, 0, self.node_feat)
+            self.edges = _scatter.apply(device_ids, edge_chunks, 0, self.edges)
+            self.n_nodes = _scatter.apply(device_ids, n_nodes_chunks, 0, self.n_nodes)
+
+        batch_lst = []  # each item in the list is a GraphBatch instance
+        for device, i in enumerate(chunks_iter):
+            # update graph_offset for each device
+            graphs = GraphBatch([], dense=self.dense)
+            graphs.n_nodes = self.n_nodes[device]
+
+            if self.dense:
+                max_nodes = max(graphs.n_nodes)
+                graphs.node_feat = [None] * gpd
+                graphs.edges = [None] * gpd
+                graphs.mask = torch.zeros(gpd, max_nodes, 1, dtype=torch.bool, device=device)
+                for k, j in enumerate(range(i, i + gpd)):
+                    n = graphs.n_nodes[k]
+
+                    assert n == len(self.node_feat[j]) == len(self.edges[j]), \
+                        (i, j, k, n, len(self.node_feat[j]), len(self.edges[j]))
+
+                    graphs.node_feat[k] = F.pad(self.node_feat[j], (0, 0, 0, max_nodes - n), mode='constant')
+                    graphs.edges[k] = F.pad(self.edges[j], (0, max_nodes - n, 0, max_nodes - n), mode='constant')
+                    graphs.mask[k, :n] = 1
+
+                graphs.node_feat = torch.stack(graphs.node_feat, dim=0).to(device)
+                graphs.edges = torch.stack(graphs.edges, dim=0).to(device)
+
+            else:
+                self.node_feat[device][:, -1] = self.node_feat[device][:, -1] - gpd * device
+                self.edges[device][:, -1] = self.edges[device][:, -1] - gpd * device
+                graphs.node_feat = self.node_feat[device]
+                graphs.edges = self.edges[device]
+
+            graphs.node_info = self.node_info[i:i + gpd]
+            graphs.net_args = self.net_args[i:i + gpd]
+            graphs.net_inds = self.net_inds[i:i + gpd]
+            batch_lst.append((nets[i:i + gpd], graphs))  # match signature of the GHN forward pass
+
+        return batch_lst
+
+    def to_device(self, device):
+        if isinstance(device, (tuple, list)):
+            device = device[0]
+
+        if self.on_device(device):
+            print('WARNING: GraphBatch is already on device %s.' % str(device))
+
+        self._cat(device)
+        self.node_feat = self.node_feat.to(device, non_blocking=True)
+        self.edges = self.edges.to(device, non_blocking=True)
+        return self
+
+    def on_device(self, device):
+        if isinstance(device, (tuple, list)):
+            device = device[0]
+        return isinstance(self.n_nodes, torch.Tensor) and self.node_feat.device == device
+
+    def to_dense(self, x=None):
+        if x is None:
+            x = self.node_feat
+        B, M, C = len(self.n_nodes), max(self.n_nodes), x.shape[-1]
+        node_feat = torch.zeros(B, M, C, device=x.device)
+        offset = [0]
+        for b in range(B):
+            node_feat[b, :self.n_nodes[b]] = x[offset[-1]: offset[-1] + self.n_nodes[b]]
+            offset.append(offset[-1] + self.n_nodes[b])
+        return node_feat, offset
+
+    def to_sparse(self, x):
+        node_feat = torch.cat([x[b, :self.n_nodes[b]] for b in range(len(self.n_nodes))])
+        return node_feat
+
+    def _sort_by_nodes(self, num_devices, gpd):
+        """
+        Sorts graphs and associated attributes in a batch by the number of nodes such
+        that the memory consumption is more balanced across GPUs.
+        :param num_devices: number of GPU devices (must be more than 1)
+        :param gpd: number of graphs per GPU
+                                (all GPUs are assumed to receive the same number of graphs)
+        :return: indices of sorted graphs
+        """
+        n_nodes = np.array(self.n_nodes)
+        sorted_idx = np.argsort(n_nodes)[::-1]  # decreasing order
+        n_nodes = n_nodes[sorted_idx]
+
+        heap = [(0, idx) for idx in range(num_devices)]
+        heapq.heapify(heap)
+        idx_groups = {}
+        for i in range(num_devices):
+            idx_groups[i] = []
+
+        for idx, n in enumerate(n_nodes):
+            while True:
+                set_sum, set_idx = heapq.heappop(heap)
+                if len(idx_groups[set_idx]) < gpd:
+                    break
+            idx_groups[set_idx].append(sorted_idx[idx])
+            heapq.heappush(heap, (set_sum + n, set_idx))
+
+        idx = np.concatenate([np.array(v) for v in idx_groups.values()])
+        idx = idx[::-1]  # to make fewer nodes on the first device (which is using more)
+
+        # Sort everything according to the idx order
+        self.n_nodes = [self.n_nodes[i] for i in idx]
+        self._n_edges = [self._n_edges[i] for i in idx]
+        self.node_info = [self.node_info[i] for i in idx]
+        self.net_args = [self.net_args[i] for i in idx]
+        self.net_inds = [self.net_inds[i] for i in idx]
+        if self.dense:
+            self.node_feat = [self.node_feat[i] for i in idx]
+            self.edges = [self.edges[i] for i in idx]
+            if len(self.mask) > 0:
+                self.mask = [self.mask[i] for i in idx]
+        else:
+            # update graph_offset for each graph
+            node_feat, edges = [], []
+            for graph_offset, i in enumerate(idx):
+                node_feat_i = self.node_feat[i]
+                edges_i = self.edges[i]
+                node_feat_i[:, -1] = graph_offset
+                edges_i[:, -1] = graph_offset
+                node_feat.append(node_feat_i)
+                edges.append(edges_i)
+            self.node_feat = node_feat
+            self.edges = edges
+
+        return idx
+
+    def _cat(self, device='cpu'):
+        if not isinstance(self.n_nodes, torch.Tensor):
+            self.n_nodes = torch.tensor(self.n_nodes, dtype=t_long, device=device)
+        else:
+            self.n_nodes = self.n_nodes.to(device, non_blocking=True)
+
+        max_nodes = max(self.n_nodes)
+
+        if not isinstance(self.node_feat, torch.Tensor):
+
+            if self.dense:
+                self.mask = torch.zeros(len(self.n_nodes), max_nodes, 1, dtype=torch.bool, device=device)
+                for i, x in enumerate(self.node_feat):
+                    self.node_feat[i] = F.pad(x, (0, 0, 0, max_nodes - len(x)), mode='constant')
+                    self.mask[i, :len(x)] = 1
+                    assert self.n_nodes[i] == len(x), (self.n_nodes[i], len(x))
+                self.node_feat = torch.stack(self.node_feat, dim=0)
+            else:
+                self.node_feat = torch.cat(self.node_feat)
+
+        if not isinstance(self.edges, torch.Tensor):
+            if self.dense:
+                for i, x in enumerate(self.edges):
+                    self.edges[i] = F.pad(x, (0, max_nodes - len(x), 0, max_nodes - len(x)), mode='constant')
+                self.edges = torch.stack(self.edges, dim=0)
+            else:
+                self.edges = torch.cat(self.edges)
+
+    def __getitem__(self, idx):
+        return self.graphs[idx]
+
+    def __len__(self):
+        return len(self.n_nodes)
+
+    def __iter__(self):
+        for graph in self.graphs:
+            yield graph
 
 
 class Graph:
@@ -35,7 +277,7 @@ class Graph:
 
     def __init__(self, model=None, node_feat=None, node_info=None, A=None, edges=None, net_args=None, net_idx=None,
                  ve_cutoff=50, list_all_nodes=False, reduce_graph=True, fix_weight_edges=True, fix_softmax_edges=True,
-                 verbose=True):
+                 dense=False, verbose=True):
         r"""
         Pass either model or node/edge arguments.
         :param model: Neural Network inherited from nn.Module
@@ -65,7 +307,8 @@ class Graph:
 
         if model is not None:
             # by default assume that the models are for ImageNet images of size 224x224
-            sz = model.expected_input_sz if hasattr(model, 'expected_input_sz') else 224
+            sz = model.expected_input_sz if hasattr(model, 'expected_input_sz') else (
+                299 if isinstance(model, torchvision.models.Inception3) else 224)
             self.expected_input_sz = sz if isinstance(sz, (tuple, list)) else (3, sz, sz)
             self.n_cells = self.model._n_cells if hasattr(self.model, '_n_cells') else 1
             self._build_graph()   # automatically construct an initial computational graph
@@ -74,18 +317,22 @@ class Graph:
             # self.visualize(figname='graph', with_labels=True, font_size=4)  # for debugging purposes
             if not hasattr(model, '_layered_modules'):
                 self.model.__dict__['_layered_modules'] = named_layered_modules(self.model)
+            self.layered_modules = self.model._layered_modules
         else:
             self.n_nodes = len(node_feat)
             self.node_feat = node_feat
             self.node_info = node_info
 
-            if edges is None:
-                if not isinstance(A, torch.Tensor):
-                    A = torch.from_numpy(A).long()
-                ind = torch.nonzero(A)
-                self.edges = torch.cat((ind, A[ind[:, 0], ind[:, 1]].view(-1, 1)), dim=1)
+            if dense:
+                self._Adj = A
             else:
-                self.edges = edges
+                if edges is None:
+                    if not isinstance(A, torch.Tensor):
+                        A = torch.from_numpy(A).long()
+                    ind = torch.nonzero(A)
+                    self.edges = torch.cat((ind, A[ind[:, 0], ind[:, 1]].view(-1, 1)), dim=1)
+                else:
+                    self.edges = edges
 
         self.net_args = net_args
         self.net_idx = net_idx
@@ -102,27 +349,29 @@ class Graph:
             model = self.model
             expected_input_sz = self.expected_input_sz
         else:
-            sz = model.expected_input_sz if hasattr(model, 'expected_input_sz') else 224
+            sz = model.expected_input_sz if hasattr(model, 'expected_input_sz') else (
+                299 if isinstance(model, torchvision.models.Inception3) else 224)
             expected_input_sz = sz if isinstance(sz, (tuple, list)) else (3, sz, sz)
 
         device = list(model.parameters())[0].device  # assume all parameters on the same device
-        loss = model((torch.rand(1, *expected_input_sz, device=device) - 0.5) / 2)
-        if isinstance(loss, tuple):
-            loss = loss[0]
-        loss = loss.mean()
-        if torch.isnan(loss):
-            print('could not estimate the number of learnable parameter tensors due the %s loss', str(loss))
-            return -1
-        else:
-            loss.backward()
-            valid_params, valid_ops = 0, 0
-            for name, p in model.named_parameters():
-                if p.requires_grad and p.grad is not None:
-                    assert p.grad is not None and p.dim() > 0, (name, p.grad)
-                    s = p.grad.abs().sum()
-                    if s > 1e-20:
-                        valid_params += p.numel()
-                        valid_ops += 1
+        with torch.enable_grad():
+            loss = model((torch.rand(1, *expected_input_sz, device=device) - 0.5) / 2)
+            if isinstance(loss, tuple):
+                loss = loss[0]
+            loss = loss.mean()
+            if torch.isnan(loss):
+                print('could not estimate the number of learnable parameter tensors due the %s loss', str(loss))
+                return -1
+            else:
+                loss.backward()
+                valid_params, valid_ops = 0, 0
+                for name, p in model.named_parameters():
+                    if p.requires_grad and p.grad is not None:
+                        assert p.grad is not None and p.dim() > 0, (name, p.grad)
+                        s = p.grad.abs().sum()
+                        if s > 1e-20:
+                            valid_params += p.numel()
+                            valid_ops += 1
 
         return valid_ops  # valid_params,
 
@@ -217,20 +466,22 @@ class Graph:
             return node_link, fn_name
 
         device = list(self.model.parameters())[0].device  # assume all params are on the same device
-        # Get model output (var) and then traverse the graph backward
-        if hasattr(self.model, 'get_var'):
-            # get_var() can be used for the models in which the input is not a 4d tensor (batch of images)
-            var = self.model.get_var()
-        else:
-            var = self.model(torch.randn(2, *self.expected_input_sz, device=device))
 
-        if not isinstance(var, (tuple, list, dict)):
-            var = [var]
-        if isinstance(var, dict):
-            var = list(var.values())
-        for v in var:
-            if v is not None:
-                traverse_graph(v.grad_fn)  # populate nodes and edges
+        with torch.enable_grad():
+            # Get model output (var) and then traverse the graph backward
+            if hasattr(self.model, 'get_var'):
+                # get_var() can be used for the models in which the input is not a 4d tensor (batch of images)
+                var = self.model.get_var()
+            else:
+                var = self.model(torch.randn(2, *self.expected_input_sz, device=device))
+
+            if not isinstance(var, (tuple, list, dict)):
+                var = [var]
+            if isinstance(var, dict):
+                var = list(var.values())
+            for v in var:
+                if v is not None:
+                    traverse_graph(v.grad_fn)  # populate nodes and edges
 
         nodes_lookup = {key: i for i, key in enumerate(nodes)}
         nodes = [{'id': key, **nodes[key]} for key in nodes_lookup]

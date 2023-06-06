@@ -1,5 +1,8 @@
 
 # Can We Scale Transformers to Predict Parameters of Diverse ImageNet Models?
+
+**To appear at [ICML 2023](https://icml.cc/Conferences/2023)**
+
 [Boris Knyazev](http://bknyaz.github.io/), [Doha Hwang](https://mila.quebec/en/person/doha-hwang/), [Simon Lacoste-Julien](http://www.iro.umontreal.ca/~slacoste/)
 
 https://arxiv.org/abs/2303.04143
@@ -8,6 +11,7 @@ https://arxiv.org/abs/2303.04143
 
 **Updates**
 
+- [June 6, 2023] GHN-3 code improved (see [ghn3/nn.py](ghn3/nn.py)), more examples added (see [example_single_model.py](example_single_model.py)).
 - [Apr 11, 2023] Cleaned up graph construction, sanity check for all PyTorch models.
 - [Apr 4, 2023] Slightly updated graph construction for ViT to be consistent with our paper. 
 Made four variants of our GHN-3 available: `ghn3tm8, ghn3sm8, ghn3lm8, ghn3xlm16` (see updated [example.ipynb](example.ipynb)).
@@ -36,11 +40,11 @@ Pull requests are also welcome.
 # Installation
 
 ```
-pip install git+https://github.com/facebookresearch/ppuda.git
+pip install git+https://github.com/facebookresearch/ppuda.git  # to have core functionality
 
-pip install torch==1.12.1 torchvision==0.13.1  # our code may work with other versions but not guaranteed
+pip install torch>=1.12.1 torchvision>=0.13.1  # [optional] update torch in case it's old
 
-pip install huggingface_hub  # to load the GHN-3 model
+pip install huggingface_hub  # to load pretrained GHNs
 
 ```
 
@@ -50,20 +54,15 @@ pip install huggingface_hub  # to load the GHN-3 model
 ```
 import torch
 import torchvision
-from ghn3 import from_pretrained, Graph, GraphBatch
+from ghn3 import from_pretrained
 
 ghn = from_pretrained()  # default is 'ghn3xlm16.pt', other variants are: 'ghn3tm8.pt', 'ghn3sm8.pt', 'ghn3lm8.pt'
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
 model = torchvision.models.resnet50()  # can be any torchvision model
-model = ghn(model, GraphBatch([Graph(model)]).to_device(device), bn_train=False)
+model = ghn(model)
 
 # That's it, the ResNet-50 is initialized with our GHN-3.
 ```
-
-`bn_train=False` if model will be fine-tuned, 
-`bn_train=True` if model will be directly evaluated.
 
 
 GHN-3 is stored in HuggingFace at 
@@ -72,7 +71,8 @@ As the largest model (`ghn3xlm16.pt`) takes about 2.5GB,
 it takes a while to download the model during 
 the first call of `ghn = from_pretrained()`.
 
-Also see [example.ipynb](example.ipynb) where we show how to predict parameters for all PyTorch models.
+See [example_single_model.py](example_single_model.py) for the examples of fine-tuning the model or GHN.
+Also see [example_all_pytorch.ipynb](example_all_pytorch.ipynb) where we show how to predict parameters for all PyTorch models.
 
 # License
 

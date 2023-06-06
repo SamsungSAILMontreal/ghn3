@@ -964,10 +964,12 @@ class GraphormerLayer(nn.Module):
 
             if edges.dim() == 2:
                 # construct a dense adjacency matrix
+                # if the edges are already of the shape (B, N, N), then do nothing
                 edges_dense = torch.zeros(N, N).to(edges)
                 edges_dense[edges[:, 0], edges[:, 1]] = edges[:, 2]
                 edges = edges_dense.unsqueeze(0)
 
+            # edges must be (B, N, N) at this stage
             edges_1hop = (edges == 1).long()
             x += self.centrality_embed_in(torch.clip(edges_1hop.sum(1), 0, self.max_degree))
             x += self.centrality_embed_out(torch.clip(edges_1hop.sum(2), 0, self.max_degree))

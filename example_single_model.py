@@ -56,10 +56,9 @@ print('\nExample of fine-tuning the GHN for %d steps:' % n_steps)
 
 model = eval(f'torchvision.models.{args.arch}()').to(args.device)
 graph = Graph(model)  # create a graph of the model once so that it can be reused for all training iterations
-graph = ghn3.GraphBatch([graph, graph], dense=ghn.is_dense())
 model.train()
 ghn.train()
-ghn.debug_level = 0  # disable debug checks and prints
+ghn.debug_level = 0  # disable debug checks and prints for every forward pass to ghn
 opt = torch.optim.SGD(ghn.parameters(), lr=0.1)
 logger = Logger(n_steps)
 for batch in range(n_steps):

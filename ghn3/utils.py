@@ -107,7 +107,7 @@ def imagenet_loader(dataset='imagenet', data_dir='./data/', test=True, im_size=2
 
     valid_data = ImageNetDataset(imagenet_dir, 'val', transform=valid_transform, has_validation=not test)
 
-    shuffle_val = True  # to evaluate models with batch norm in the training mode (in case there is no running statistics)
+    shuffle_val = True  # to eval models with batch norm in the training mode (in case there is no running statistics)
     n_classes = len(valid_data.classes)
     generator = torch.Generator()
     generator.manual_seed(seed)  # to reproduce evaluation with shuffle=True on ImageNet

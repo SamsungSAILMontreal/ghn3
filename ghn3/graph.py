@@ -24,9 +24,8 @@ import torchvision.models as models
 import torch.nn.functional as F
 import ppuda.deepnets1m.ops as ops
 from torch.nn.parallel.scatter_gather import Scatter as _scatter
-from ppuda.deepnets1m.net import get_cell_ind
+from ppuda.deepnets1m.net import get_cell_ind, named_layered_modules
 from ppuda.deepnets1m.genotypes import PRIMITIVES_DEEPNETS1M
-from .utils import named_layered_modules
 
 
 import sys
@@ -82,6 +81,10 @@ class GraphBatch:
         self.node_info.append(graph.node_info)      # op names, ids, etc.
         self.net_args.append(graph.net_args)        # a dictionary of arguments to construct a Network object
         self.net_inds.append(graph.net_idx)         # network integer identifier (optional)
+        if hasattr(graph, 'net'):
+            if not hasattr(self, 'nets'):
+                self.nets = []
+            self.nets.append(graph.net)
 
     def scatter(self, device_ids, nets):
         """
@@ -212,7 +215,6 @@ class GraphBatch:
 
         # Sort everything according to the idx order
         self.n_nodes = [self.n_nodes[i] for i in idx]
-        self._n_edges = [self._n_edges[i] for i in idx]
         self.node_info = [self.node_info[i] for i in idx]
         self.net_args = [self.net_args[i] for i in idx]
         self.net_inds = [self.net_inds[i] for i in idx]
@@ -222,6 +224,7 @@ class GraphBatch:
             if len(self.mask) > 0:
                 self.mask = [self.mask[i] for i in idx]
         else:
+            self._n_edges = [self._n_edges[i] for i in idx]
             # update graph_offset for each graph
             node_feat, edges = [], []
             for graph_offset, i in enumerate(idx):
@@ -327,7 +330,7 @@ class Graph:
             # self.visualize(figname='graph', with_labels=True, font_size=4)  # for debugging purposes
             if not hasattr(model, '_layered_modules'):
                 self.model.__dict__['_layered_modules'] = named_layered_modules(self.model)
-            self.layered_modules = self.model._layered_modules
+            # self.layered_modules = self.model._layered_modules
         else:
             self.n_nodes = len(node_feat)
             self.node_feat = node_feat

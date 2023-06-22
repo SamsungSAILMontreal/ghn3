@@ -1,20 +1,21 @@
 
 # Can We Scale Transformers to Predict Parameters of Diverse ImageNet Models?
 
-**To appear at [ICML 2023](https://icml.cc/Conferences/2023)**
+**To appear at [ICML 2023](https://icml.cc/virtual/2023/poster/24569)**
 
 [Boris Knyazev](http://bknyaz.github.io/), [Doha Hwang](https://mila.quebec/en/person/doha-hwang/), [Simon Lacoste-Julien](http://www.iro.umontreal.ca/~slacoste/)
 
-https://arxiv.org/abs/2303.04143
+Paper: https://arxiv.org/abs/2303.04143, https://openreview.net/forum?id=7UXf8dAz5T
 
 # Introduction
 
 **Updates**
 
-- [June 6, 2023] GHN-3 code improved (see [ghn3/nn.py](ghn3/nn.py)), more examples added (see [example_single_model.py](example_single_model.py)).
+- [June 22, 2023] Major code refactoring. Distributed (DDP) training and eval scripts added (see [Experiments](#experiments) below).
+- [June 6, 2023] GHN-3 code improved (see [ghn3/nn.py](ghn3/nn.py)), more examples added (see [ghn_single_model.py](examples/ghn_single_model.py)).
 - [Apr 11, 2023] Cleaned up graph construction, sanity check for all PyTorch models.
 - [Apr 4, 2023] Slightly updated graph construction for ViT to be consistent with our paper. 
-Made four variants of our GHN-3 available: `ghn3tm8, ghn3sm8, ghn3lm8, ghn3xlm16` (see updated [example.ipynb](example.ipynb)).
+Made four variants of our GHN-3 available: `ghn3tm8, ghn3sm8, ghn3lm8, ghn3xlm16` (see updated [ghn_all_pytorch.ipynb](examples/ghn_all_pytorch.ipynb)).
 `ghn3tm8` takes just 27MB so it is efficient to use in low-memory cases.
  
 
@@ -40,7 +41,11 @@ Pull requests are also welcome.
 # Installation
 
 ```
-pip install git+https://github.com/facebookresearch/ppuda.git  # to have core functionality
+# If you didn't install ppuda before:
+pip install git+https://github.com/facebookresearch/ppuda.git
+
+# If you had ppuda installed before, you need to reinstall it, because it was updated recently:
+pip install git+https://github.com/facebookresearch/ppuda.git --no-deps --upgrade --force-reinstall
 
 pip install torch>=1.12.1 torchvision>=0.13.1  # [optional] update torch in case it's old
 
@@ -71,8 +76,19 @@ As the largest model (`ghn3xlm16.pt`) takes about 2.5GB,
 it takes a while to download the model during 
 the first call of `ghn = from_pretrained()`.
 
-See [example_single_model.py](example_single_model.py) for the examples of fine-tuning the model or GHN.
-Also see [example_all_pytorch.ipynb](example_all_pytorch.ipynb) where we show how to predict parameters for all PyTorch models.
+See [ghn_single_model.py](examples/ghn_single_model.py) for the examples of fine-tuning the model or GHN.
+Also see [ghn_all_pytorch.ipynb](examples/ghn_all_pytorch.ipynb) where we show how to predict parameters for all PyTorch models.
+
+# Experiments
+
+These scripts allow for training and evaluation of PyTorch models and GHN-3 and comparing to the baselines as in our paper.
+Training will be automatically run using `DistributedDataParallel` on all GPUs available if the script is run using `torchrun`.
+See command examples in [train_ghn_ddp.py](train_ghn_ddp.py) and [train_ddp.py](train_ddp.py).
+
+- For training GHN-3 see commands in [train_ghn_ddp.py](train_ghn_ddp.py).
+- For evaluating GHN-3 see commands in [eval_ghn_imagenet.py](eval_ghn_imagenet.py).
+- For training PyTorch models with and without GHN-3 initialization see commands in [train_ddp.py](train_ddp.py).
+- For evaluating PyTorch models see commands in [eval_imagenet.py](eval_imagenet.py).
 
 # License
 
@@ -82,10 +98,10 @@ https://github.com/facebookresearch/ppuda that is also licensed under [MIT licen
 # Citation
 
 ```
-@article{knyazev2023canwescale,
+@inproceedings{knyazev2023canwescale,
   title={Can We Scale Transformers to Predict Parameters of Diverse ImageNet Models?},
   author={Knyazev, Boris and Hwang, Doha and Lacoste-Julien, Simon},
-  journal={arXiv preprint arXiv:2303.04143},
+  booktitle={International Conference on Machine Learning},
   year={2023}
 }
 ```

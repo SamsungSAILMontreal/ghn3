@@ -5,12 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Evaluates a GHN on all PyTorch models on ImageNet.
+Evaluates a GHN on one or all PyTorch models on ImageNet.
 This script assumes the ImageNet dataset is already downloaded and set up as described in scripts/imagenet_setup.sh
 
-Example:
+Example (evaluating all models):
 
     python eval_ghn_imagenet.py -d imagenet -D $SLURM_TMPDIR --ckpt ghn3xlm16.pt
+
+Example (evaluating a single model like ResNet-50):
+
+    python eval_ghn_imagenet.py -d imagenet -D $SLURM_TMPDIR --ckpt ghn3xlm16.pt --arch resnet50
 
 """
 
@@ -22,7 +26,8 @@ import time
 import inspect
 from ppuda.config import init_config
 from ppuda.utils import infer, AvgrageMeter
-from ghn3 import from_pretrained, get_metadata, imagenet_loader
+from ppuda.vision.loader import image_loader
+from ghn3 import from_pretrained, get_metadata
 
 
 args = init_config(mode='eval')
@@ -31,26 +36,29 @@ ghn = from_pretrained(args.ckpt, debug_level=args.debug).to(args.device)  # get 
 ghn.eval()  # should be a little bit more efficient in the eval mode
 
 print('loading the %s dataset...' % args.dataset)
-images_val, num_classes = imagenet_loader(args.dataset,
-                                          args.data_dir,
-                                          test=True,
-                                          test_batch_size=64,
-                                          num_workers=args.num_workers,
-                                          noise=args.noise,
-                                          im_size=224,
-                                          seed=args.seed)[1:]
+images_val, num_classes = image_loader(args.dataset,
+                                       args.data_dir,
+                                       test=True,
+                                       test_batch_size=64,
+                                       num_workers=args.num_workers,
+                                       noise=args.noise,
+                                       im_size=224,
+                                       seed=args.seed)[1:]
 
 # Create a separate loader for 299x299 images required for inception_v3
-images_val_im299 = imagenet_loader(args.dataset,
-                                   args.data_dir,
-                                   test=True,
-                                   test_batch_size=64,
-                                   num_workers=args.num_workers,
-                                   noise=args.noise,
-                                   im_size=299,
-                                   seed=args.seed)[1]
+images_val_im299 = image_loader(args.dataset,
+                                args.data_dir,
+                                test=True,
+                                test_batch_size=64,
+                                num_workers=args.num_workers,
+                                noise=args.noise,
+                                im_size=299,
+                                seed=args.seed)[1]
 
-assert ghn.num_classes == num_classes, 'the eval image dataset and the dataset that the GHN was trained must match'
+assert ghn.num_classes == num_classes, 'The eval image dataset and the dataset the GHN was trained on must match, ' \
+                                       'But it is possible to fine-tune predicted parameters for a different dataset.' \
+                                       'See example scripts for details.'
+
 
 norms = get_metadata(args.ckpt, attr='paramnorm')  # load meta-data for sanity checks
 
@@ -61,6 +69,10 @@ for m in dir(models):
     if m[0].isupper() or m.startswith('_') or m.startswith('get') or m == 'list_models' or \
             not inspect.isfunction(eval('models.%s' % m)):
         continue
+
+    if args.arch is not None and m == args.arch:
+        all_torch_models = [m]
+        break
 
     if m not in norms:
         print('=== %s was not in PyTorch at the moment of GHN-3 evaluation, so skipping it in this notebook ==='

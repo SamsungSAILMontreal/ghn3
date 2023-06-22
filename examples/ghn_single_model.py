@@ -8,8 +8,8 @@
 Predicts parameters of a PyTorch model using one of the pretrained GHNs.
 
 Example (use --debug 1 to perform additional sanity checks and print more information):
-
-    python example_single_model.py --ckpt ghn3tm8.pt --arch resnet50 --debug 0
+    export PYTHONPATH=$PYTHONPATH:./;  # to import ghn3 modules from the subfolder
+    python examples/ghn_single_model.py --ckpt ghn3tm8.pt --arch resnet50 --debug 0;
 
 """
 
@@ -17,8 +17,6 @@ Example (use --debug 1 to perform additional sanity checks and print more inform
 import torch
 import torchvision
 from ppuda.config import init_config
-
-import ghn3
 from ghn3 import from_pretrained, norm_check, Graph, Logger
 
 

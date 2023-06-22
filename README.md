@@ -49,15 +49,20 @@ pip install git+https://github.com/facebookresearch/ppuda.git --no-deps --upgrad
 
 pip install torch>=1.12.1 torchvision>=0.13.1  # [optional] update torch in case it's old
 
-pip install huggingface_hub  # to load pretrained GHNs
+pip install huggingface_hub joblib # to load pretrained GHNs
+
+pip install timm  # [optional] to use fancy optimizers like LAMB
 
 ```
+
+# Imagenet
+
+For training and evaluation on ImageNet, one needs to setup 
+ImageNet as in [scripts/imagenet_setup.sh](scripts/imagenet_setup.sh).
 
 # Usage
 
-
 ```
-import torch
 import torchvision
 from ghn3 import from_pretrained
 

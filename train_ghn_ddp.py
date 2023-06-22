@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Trains Graph HyperNetwork (GHN-3) on DeepNets-1M and ImageNet using DistributedDataParallel (DDP).
+Trains a Graph HyperNetwork (GHN-3) on DeepNets-1M and ImageNet. DistributedDataParallel (DDP) training is
+used if `torchrun` is used as shown below.
+This script assumes the ImageNet dataset is already downloaded and set up as described in scripts/imagenet_setup.sh.
 
 Example:
 
@@ -21,6 +23,8 @@ Example:
 
     # Sometimes, there can be mysterious errors due to DDP (depending on the pytorch/cuda version).
     # So it can be a good idea to wrap this command in a for loop to continue training in case of failure.
+
+    # Use eval_ghn_imagenet.py to evaluate the trained GHN-3 model on ImageNet.
 
 """
 
@@ -71,7 +75,7 @@ def main():
                                                seed=args.seed,
                                                verbose=ddp.rank == 0)
 
-    is_ghn2 = False
+    is_ghn2 = False  # to train GHN-2, use https://github.com/facebookresearch/ppuda
     hid = args.hid
     config = {'max_shape': args.max_shape, 'num_classes': num_classes, 'hypernet': args.hypernet,
               'decoder': args.decoder, 'weight_norm': args.weight_norm, 've': args.virtual_edges > 1,
@@ -114,7 +118,7 @@ def main():
     log('\nStarting training GHN with {} parameters!'.format(sum([p.numel() for p in ghn.parameters()])))
     if ddp.ddp:
         log(f"shuffle DeepNets1MDDP train loader (set seed to {args.seed})", flush=True)
-        # first set order according to the seed
+        # first set sample order according to the seed
         sampler.sampler.set_epoch(args.seed)
     graphs_queue = iter(graphs_queue)
 
@@ -122,7 +126,7 @@ def main():
 
         log('\nepoch={:03d}/{:03d}, lr={:e}'.format(epoch + 1, args.epochs, trainer.get_lr()))
 
-        if ddp.ddp and epoch > trainer.start_epoch:  # make sure order is different for ckpt loaded from steps
+        if ddp.ddp and epoch > trainer.start_epoch:  # make sure sample order is different for each epoch
             log(f'shuffle DeepNets1MDDP train loader (set seed to {epoch})')
             sampler.sampler.set_epoch(epoch)
 
@@ -137,9 +141,9 @@ def main():
             trainer.update(images, targets, graphs=next(graphs_queue))
             trainer.log(step)
             if args.save:
-                trainer.save(epoch, step, {'args': args})
+                trainer.save(epoch, step, {'args': args})  # save GHN checkpoint
 
-        trainer.scheduler_step()
+        trainer.scheduler_step()  # lr scheduler step
 
     log('done!', flush=True)
     if ddp.ddp:

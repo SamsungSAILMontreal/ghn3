@@ -6,7 +6,7 @@
 
 """
 Evaluates a GHN on one or all PyTorch models on ImageNet.
-This script assumes the ImageNet dataset is already downloaded and set up as described in scripts/imagenet_setup.sh
+This script assumes the ImageNet dataset is already downloaded and set up as described in scripts/imagenet_setup.sh.
 
 Example (evaluating all models):
 

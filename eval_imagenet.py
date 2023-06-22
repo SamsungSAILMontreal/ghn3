@@ -6,7 +6,7 @@
 
 """
 Evaluates a trained PyTorch model on ImageNet.
-This script assumes the ImageNet dataset is already downloaded and set up as described in scripts/imagenet_setup.sh
+This script assumes the ImageNet dataset is already downloaded and set up as described in scripts/imagenet_setup.sh.
 
 Example:
 

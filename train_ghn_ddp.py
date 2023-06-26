@@ -28,7 +28,7 @@ Example:
 
     # To train GHN-3-T/m8 on CIFAR-10:
     python train_ghn_ddp.py -n -v 50 --ln -m 8 --name ghn3tm8-c10 --hid 64 --layers 3 --opt adamw --lr 4e-4 --wd 1e-2 \
-     --scheduler cosine-warmup --debug 0
+     --scheduler cosine-warmup --amp --debug 0
 
 """
 
@@ -45,6 +45,12 @@ log = partial(log, flush=True)
 
 def main():
     parser = argparse.ArgumentParser(description='GHN-3 training')
+    parser.add_argument('--max_shape', type=str, default=None,
+                        help='max shape "c_out, c_in" of the predicted params. '
+                             'If None, max_shape will be calculated based on the --hid and --dataset arguments.')
+    args = parser.parse_known_args()[0]
+    max_shape = args.max_shape
+
     parser.add_argument('--layers', type=int, default=3, help='number of layers in GHN-3')
     parser.add_argument('--heads', type=int, default=8, help='number of self-attention heads in GHN-3')
     parser.add_argument('--compile', type=str, default=None, help='use pytorch2.0 compilation for potential speedup')
@@ -59,7 +65,6 @@ def main():
         dist.barrier()  # wait for the save folder to be created by rank 0 process
     if args is None:
         args = init_config(mode='train_ghn', parser=parser, verbose=ddp.rank == 0)
-
     if hasattr(args, 'multigpu') and args.multigpu:
         raise NotImplementedError(
             'the `multigpu` argument was meant to use nn.DataParallel in the GHN-2 code. '
@@ -80,15 +85,29 @@ def main():
                                                verbose=ddp.rank == 0)
 
     hid = args.hid
-    config = {'max_shape': args.max_shape, 'num_classes': num_classes, 'hypernet': args.hypernet,
-              'decoder': args.decoder, 'weight_norm': args.weight_norm, 've': args.virtual_edges > 1,
-              'layernorm': args.ln, 'hid': hid, 'layers': args.layers, 'heads': args.heads, 'is_ghn2': args.ghn2}
-
     s = 16 if is_imagenet else 11
     default_max_shape = (hid * 2, hid * 2, s, s) if args.ghn2 else (hid, hid, s, s)
-    if args.max_shape != default_max_shape:
-        log('WARNING: max_shape {} is different from the default GHN2/GHN3 max_shape {}. '.format(
-            args.max_shape, default_max_shape))
+    if max_shape is None:
+        max_shape = default_max_shape
+    else:
+        c = list(map(int, max_shape.split(',')))
+        if len(c) == 1:
+            max_shape = (c[0], c[0], s, s)
+        elif len(c) == 2:
+            max_shape = (c[0], c[1], s, s)
+        elif len(c) == 4:
+            max_shape = tuple(c)
+        else:
+            raise NotImplementedError('max_shape should be a string of 1, 2 or 4 integers separated by commas. '
+                                      'For example: --max_shape "64,64" or --max_shape "64,64,11,11"')
+
+    log('current max_shape: {} {} default max_shape: {}'.format(max_shape,
+                                                                '=' if max_shape == default_max_shape else '!=',
+                                                                default_max_shape))
+
+    config = {'max_shape': max_shape, 'num_classes': num_classes, 'hypernet': args.hypernet,
+              'decoder': args.decoder, 'weight_norm': args.weight_norm, 've': args.virtual_edges > 1,
+              'layernorm': args.ln, 'hid': hid, 'layers': args.layers, 'heads': args.heads, 'is_ghn2': args.ghn2}
 
     ghn = GHN3(**config, debug_level=args.debug)
     graphs_queue, sampler = DeepNets1MDDP.loader(args.meta_batch_size // (ddp.world_size if ddp.ddp else 1),
@@ -150,7 +169,7 @@ def main():
             trainer.update(images, targets, graphs=next(graphs_queue))
             trainer.log(step)
             if args.save:
-                trainer.save(epoch, step, {'args': args})  # save GHN checkpoint
+                trainer.save(epoch, step, {'args': args, 'config': config})  # save GHN checkpoint
 
         trainer.scheduler_step()  # lr scheduler step
 

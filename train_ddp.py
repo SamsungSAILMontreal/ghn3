@@ -29,7 +29,7 @@ Example:
     --name resnet50-ghn3init-ddp --arch resnet50 -e 90 --wd 1e-4 -b 512 --amp --scheduler cosine --lr 1e-3 --opt lamb \
     --ckpt ghn3xlm16.pt
 
-    # Use eval_imagenet.py to evaluate the trained model on ImageNet.
+    # Use eval.py to evaluate the trained model on ImageNet.
 
 """
 
@@ -73,7 +73,7 @@ def main():
     log('loading the %s dataset...' % args.dataset.upper())
     train_queue = image_loader(args.dataset,
                                args.data_dir,
-                               im_size=224,
+                               im_size=224 if is_imagenet else 32,
                                test=not args.val,
                                load_train_anyway=True,
                                batch_size=args.batch_size,

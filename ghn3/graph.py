@@ -22,9 +22,10 @@ import transformers
 import torchvision
 import torchvision.models as models
 import torch.nn.functional as F
-import ppuda.deepnets1m.ops as ops
+import ppuda.deepnets1m.ops as ppuda_ops
+from .ops import Network, PosEnc
 from torch.nn.parallel.scatter_gather import Scatter as _scatter
-from ppuda.deepnets1m.net import get_cell_ind, named_layered_modules
+from ppuda.deepnets1m.net import get_cell_ind, named_layered_modules, Network as NetworkPPUDA
 from ppuda.deepnets1m.genotypes import PRIMITIVES_DEEPNETS1M
 
 
@@ -327,7 +328,7 @@ class Graph:
             self._build_graph()   # automatically construct an initial computational graph
             self._add_virtual_edges(ve_cutoff=ve_cutoff)  # add virtual edges
             self._construct_features()  # initialize torch.Tensor node and edge features
-            # self.visualize(figname='graph', with_labels=True, font_size=4)  # for debugging purposes
+            # self.visualize(figname='graph', figsize=(20, 20), with_labels=True, font_size=4)  # for debugging purposes
             if not hasattr(model, '_layered_modules'):
                 self.model.__dict__['_layered_modules'] = named_layered_modules(self.model)
             # self.layered_modules = self.model._layered_modules
@@ -526,11 +527,11 @@ class Graph:
                 if node['param_name'].find(pattern) < 0:  # if no 'weight' string in the name, assume graph is correct
                     continue
 
-                for out_neigh in np.where(A[i, :])[ 0]:  # all nodes with an edge from the weight node, e.g. bias
+                for out_neigh in np.where(A[i, :])[0]:  # all nodes with an edge from the weight node, e.g. bias
 
                     is_same_layer = node['module'] == nodes[out_neigh]['module']
-
-                    if is_same_layer:
+                    qkv = len(np.where(A[:, i])[0]) == 0 and nodes[out_neigh]['param_name'].lower().find('softmax') >= 0
+                    if is_same_layer or qkv:
 
                         n_out = len(np.where(A[i, :])[0])  # number of out neighbors the weight node has
 
@@ -565,9 +566,10 @@ class Graph:
                             n_paths += 1
                             if n_paths > 1:
                                 break
-
-                        A[j, out_neigh] = 0  # For ViTs, there should be 2 paths, so remove the 2nd edge to msa/softmax
-                        if n_paths == 1:
+                        # if n_paths == 1 and A[i, j] == 1, then do not change anything
+                        if n_paths > 1 or A[i, j] == 0:
+                            A[j, out_neigh] = 0  # For ViTs, there should be 2 paths, so remove the 2nd edge to softmax
+                        if n_paths == 1 and A[i, j] == 0:
                             # if only one path from j to out_neigh, then the edge (j, i) will replace (j, out_neigh)
                             A[j, i] = 1
 
@@ -621,10 +623,10 @@ class Graph:
 
         if self.model is not None:
             # Fix some issues with automatically constructing graphs for some models
-            if isinstance(self.model, models.VisionTransformer):
+            if isinstance(self.model, (models.VisionTransformer, Network, NetworkPPUDA)):
                 # Adjust PosEnc for PyTorch ViTs to be consistent with the GHN/DeepNets-1M code
                 for i, node in enumerate(nodes):
-                    if isinstance(node['module'], (ops.PosEnc, models.vision_transformer.Encoder)):
+                    if isinstance(node['module'], (PosEnc, ppuda_ops.PosEnc, models.vision_transformer.Encoder)):
                         nodes.insert(i + 1,
                                      {'id': 'sum_pos_enc', 'param_name': 'AddBackward0', 'attrs': None, 'module': None})
                         A = np.insert(A, i, 0, axis=0)
@@ -661,7 +663,7 @@ class Graph:
 
                 supported = False
 
-                if type(node['module']) in ops.NormLayers and op_name.endswith('.bias'):
+                if node['module'].__class__.__name__.lower().find('norm') >= 0 and op_name.endswith('.bias'):
                     # In the GHN-2/GHN-3 works the biases of NormLayers are excluded from the graph,
                     # because the biases are always present in NormLayers and thus such nodes are redundant
                     # The parameters of these biases are still predicted
@@ -704,7 +706,7 @@ class Graph:
 
                     # Checks for the CSE operation and Add/Concat redundant nodes
                     try:
-                        neighbors = dict([(j, self._nodes[i + j]['param_name'].lower()) for j in [-1, -2, 1]])
+                        neighbors = dict([(j, self._nodes[i + j]['param_name'].lower()) for j in [-1, -2, -3, 1]])
                         # Check that this node belongs to the classification head by assuming a certain order of nodes
                         classifier_head = np.any([neighbors[j].startswith(('classifier', 'fc', 'head')) for j in [-1, -2]])
                     except Exception as e:
@@ -719,11 +721,12 @@ class Graph:
                     elif op_name.startswith('Mul'):
                         # If below is True, then this Mul op is assumed to be the CSE op
                         # Otherwise, it is some other Mul op that we do not need to add to the graph
+                        # This code is very error-prone and needs to be improved
                         keep = has_sigmoid_swish_cse and \
                                not classifier_head and \
                                (neighbors[-2].startswith(('hard', 'sigmoid')) or
+                                neighbors[-3].startswith(('relu', 'mean')) or
                                 neighbors[1].startswith(('hard', 'sigmoid', 'relu')))
-
                     elif op_name.startswith(('Cat', 'Add')):  # Concat and Residual (Sum) ops
                         keep = n_incoming[i] > 1  # keep only if > 1 edges are incoming, otherwise the node is redundant
                     else:
@@ -994,6 +997,9 @@ class Graph:
         :return:
         """
 
+        if figname is not None:
+            import matplotlib
+            matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         from matplotlib import cm as cm
 
@@ -1116,7 +1122,8 @@ MODULES = {
             models.convnext.LayerNorm2d: lambda module, op_name: 'ln',  # using a separate op (e.g. ln2) could be better
             # We use pos_enc to denote any kind of embedding, which is not the best option
             # Consider adding separate node types (e.g. 'embed') to differentiate between embedding layers
-            ops.PosEnc: lambda module, op_name: 'pos_enc',
+            PosEnc: lambda module, op_name: 'pos_enc',
+            ppuda_ops.PosEnc: lambda module, op_name: 'pos_enc',
             nn.modules.sparse.Embedding: lambda module, op_name: 'pos_enc',
             models.vision_transformer.Encoder: lambda module, op_name: 'pos_enc',  # positional encoding in PyTorch ViTs
             'input': 'input',

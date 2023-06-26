@@ -11,6 +11,7 @@ Paper: https://arxiv.org/abs/2303.04143, https://openreview.net/forum?id=7UXf8dA
 
 **Updates**
 
+- [June 26, 2023] Training and eval on CIFAR-10 and eval on the DeepNets splits are supported.
 - [June 22, 2023] Major code refactoring. Distributed (DDP) training and eval scripts added (see [Experiments](#experiments) below).
 - [June 6, 2023] GHN-3 code improved (see [ghn3/nn.py](ghn3/nn.py)), more examples added (see [ghn_single_model.py](examples/ghn_single_model.py)).
 - [Apr 11, 2023] Cleaned up graph construction, sanity check for all PyTorch models.
@@ -60,6 +61,8 @@ pip install timm  # [optional] to use fancy optimizers like LAMB
 For training and evaluation on ImageNet, one needs to setup 
 ImageNet as in [scripts/imagenet_setup.sh](scripts/imagenet_setup.sh).
 
+**Training and evaluation on CIFAR-10 is now also supported, however, it was not presented in the paper.**
+
 # Usage
 
 ```
@@ -91,9 +94,9 @@ Training will be automatically run using `DistributedDataParallel` on all GPUs a
 See command examples in [train_ghn_ddp.py](train_ghn_ddp.py) and [train_ddp.py](train_ddp.py).
 
 - For training GHN-3 see commands in [train_ghn_ddp.py](train_ghn_ddp.py).
-- For evaluating GHN-3 see commands in [eval_ghn_imagenet.py](eval_ghn_imagenet.py).
+- For evaluating GHN-3 see commands in [eval_ghn.py](eval_ghn.py) (make sure to use `--split torch` for evaluation on PyTorch).
 - For training PyTorch models with and without GHN-3 initialization see commands in [train_ddp.py](train_ddp.py).
-- For evaluating PyTorch models see commands in [eval_imagenet.py](eval_imagenet.py).
+- For evaluating PyTorch models see commands in [eval.py](eval.py).
 
 # License
 

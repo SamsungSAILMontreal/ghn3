@@ -19,6 +19,7 @@ import numpy as np
 import joblib
 import time
 import hashlib
+import huggingface_hub
 from huggingface_hub import hf_hub_download
 from ppuda.ghn.nn import GHN, ConvDecoder
 from ppuda.utils import capacity
@@ -31,8 +32,8 @@ from .ops import TransformerLayer as GraphormerLayer
 def from_pretrained(ghn3_name='ghn3xlm16.pt', **kwargs):
     """
     Loads a pretrained GHN-3 or GHN-2 model.
-    :param ghn3_name: model name from https://huggingface.co/SamsungSAILMontreal/ghn3
-    :param kwargs: GHN arguments
+    :param ghn3_name: model name from https://huggingface.co/SamsungSAILMontreal/ghn3 or a local file path
+    :param kwargs: extra GHN arguments
     :return: GHN model (in the training mode by default)
     """
 
@@ -43,49 +44,67 @@ def from_pretrained(ghn3_name='ghn3xlm16.pt', **kwargs):
     verbose = 'debug_level' in kwargs and kwargs['debug_level']
     if verbose:
         log('loading %s...' % ghn3_name)
+    try:
+        state_dict = joblib.load(hf_hub_download(repo_id='SamsungSAILMontreal/ghn3', filename=ghn3_name))
+        ghn_config = None
+    except huggingface_hub.utils.HfHubHTTPError as e:
+        print(e, '\nTrying to load from local file...')
+        state_dict = torch.load(ghn3_name, map_location='cpu')
+        if 'config' not in state_dict:
+            raise ValueError('The checkpoint must contain a GHN config dictionary.')
+        ghn_config = state_dict['config']
+        state_dict = state_dict['state_dict']
 
-    is_ghn2 = False
-    if ghn3_name.find('ghn3t') >= 0:
-        hid = 64
-        heads = 8
-        layers = 3
-    elif ghn3_name.find('ghn3s') >= 0:
-        hid = 128
-        heads = 16
-        layers = 5
-    elif ghn3_name.find('ghn3l') >= 0:
-        hid = 256
-        heads = 16
-        layers = 12
-    elif ghn3_name.find('ghn3xl') >= 0:
-        hid = 384
-        heads = 16
-        layers = 24
-    elif ghn3_name.find('ghn2') >= 0:
-        hid = 32
-        heads = 0
-        layers = 1
-        is_ghn2 = True
+    if ghn_config is None:
+        is_ghn2 = False
+        if ghn3_name.find('ghn3t') >= 0:
+            hid = 64
+            heads = 8
+            layers = 3
+        elif ghn3_name.find('ghn3s') >= 0:
+            hid = 128
+            heads = 16
+            layers = 5
+        elif ghn3_name.find('ghn3l') >= 0:
+            hid = 256
+            heads = 16
+            layers = 12
+        elif ghn3_name.find('ghn3xl') >= 0:
+            hid = 384
+            heads = 16
+            layers = 24
+        elif ghn3_name.find('ghn2') >= 0:
+            hid = 32
+            heads = 0
+            layers = 1
+            is_ghn2 = True
+        else:
+            raise NotImplementedError(ghn3_name)
+
+        ghn_config = {'hid': hid,
+                      'max_shape': (hid * 2, hid * 2, 16, 16) if is_ghn2 else (hid, hid, 16, 16),
+                      'num_classes': 1000,
+                      'heads': heads,
+                      'layers': layers,
+                      'is_ghn2': is_ghn2,
+                      'weight_norm': True,
+                      've': True,
+                      'layernorm': True,
+                      'pretrained': True
+                      }
     else:
-        raise NotImplementedError(ghn3_name)
+        # Loading from the local file
+        if 'is_ghn2' in ghn_config:
+            is_ghn2 = ghn_config['is_ghn2']
+        else:
+            is_ghn2 = np.any([p_name.find('gnn.gru.') >= 0 for p_name in state_dict.keys()])
+            ghn_config['is_ghn2'] = is_ghn2
+    ghn = GHN3(**ghn_config, **kwargs)
 
-    ghn = GHN3(hid=hid,
-               max_shape=(hid * 2, hid * 2, 16, 16) if is_ghn2 else (hid, hid, 16, 16),
-               num_classes=1000,
-               heads=heads,
-               layers=layers,
-               is_ghn2=is_ghn2,
-               weight_norm=True,
-               ve=True,
-               layernorm=True,
-               pretrained=True,
-               **kwargs)
-
-    state_dict = joblib.load(hf_hub_download(repo_id='SamsungSAILMontreal/ghn3', filename=ghn3_name))
     if is_ghn2:
         for n, p in state_dict.items():
             if n.find('decoder.') >= 0 and p.dim() == 4:
-                state_dict[n] = p.squeeze()
+                state_dict[n] = p.squeeze()  # transforming 4D conv layer weights to 2D linear layer weights
     ghn.load_state_dict(state_dict)
     if verbose:
         log('loading %s with %d parameters is done!' % (ghn3_name,
@@ -109,7 +128,7 @@ class GHN3(GHN):
     But most of the functions are overridden to support GHN-3 and improve code.
 
     """
-    def __init__(self, max_shape, num_classes, hid, heads, layers, is_ghn2=False, pretrained=False, **kwargs):
+    def __init__(self, max_shape, num_classes, hid, heads=8, layers=3, is_ghn2=False, pretrained=False, **kwargs):
 
         act_layer = kwargs.pop('act_layer', nn.GELU)
         super().__init__(max_shape, num_classes, hid=hid, **kwargs)
@@ -192,8 +211,12 @@ class GHN3(GHN):
             graphs = GraphBatch([graphs] if isinstance(graphs, Graph) else graphs,
                                 dense=self.is_dense()).to_device(device)
 
-        if not graphs.on_device(device):
+        if isinstance(graphs, GraphBatch):
+            if not graphs.on_device(device):
+                graphs.to_device(device)
+        elif not isinstance(graphs.n_nodes, torch.Tensor):
             graphs.to_device(device)
+            graphs.dense = False
 
         assert graphs.dense == self.is_dense(), ('For this GHN architecture, '
                                                  'GraphBatch must be created with dense={}'.format(self.is_dense()))
@@ -306,8 +329,8 @@ class GHN3(GHN):
                 if isinstance(module, nn.BatchNorm2d):
                     module.track_running_stats = False
                     module.training = True
-
-            nets_torch.apply(bn_set_train)  # set BN layers to the training mode to enable eval w/o running statistics
+            for net in nets_torch:
+                net.apply(bn_set_train)  # set BN layers to the training mode to enable eval w/o running statistics
 
         self._print_debug_info(nets_torch, debug_info)
 
@@ -585,12 +608,15 @@ class GHN3(GHN):
             for cell_id in range(len(node_info)):
                 for (node_ind, p_, name, sz, last_weight, last_bias) in node_info[cell_id]:
 
-                    param_name = p_ if p_.endswith(
+                    p_name = p_ if p_.endswith(
                         ('.weight', '.bias', 'in_proj_weight', 'in_proj_bias')) else p_ + '.weight'
-                    try:
-                        matched = [target_modules[cell_id][param_name]]
-                    except:
-                        matched = []
+                    for param_name in [p_name,
+                                       p_name.replace('to_qkv', 'attn.to_qkv').replace('to_out', 'attn.to_out')]:
+                        try:
+                            matched = [target_modules[cell_id][param_name]]
+                            break
+                        except:
+                            matched = []
 
                     if len(matched) == 0:
                         if sz is not None:

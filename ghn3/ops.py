@@ -580,6 +580,7 @@ types_light = create_ops(light=True)
 types_torch_nn = create_ops(light=False)
 
 TransformerLayer = types_torch_nn['TransformerLayer']   # used to create GHN-3 in nn.py
+PosEnc = types_torch_nn['PosEnc']
 Network = types_torch_nn['Network']                     # for evaluating GHNs
 NetworkLight = types_light['Network']                   # for training GHNs
 

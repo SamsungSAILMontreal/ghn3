@@ -24,11 +24,11 @@ Example:
     # Sometimes, there can be mysterious errors due to DDP (depending on the pytorch/cuda version).
     # So it can be a good idea to wrap this command in a for loop to continue training in case of failure.
 
-    # Use eval_ghn_imagenet.py to evaluate the trained GHN-3 model on ImageNet.
-
     # To train GHN-3-T/m8 on CIFAR-10:
     python train_ghn_ddp.py -n -v 50 --ln -m 8 --name ghn3tm8-c10 --hid 64 --layers 3 --opt adamw --lr 4e-4 --wd 1e-2 \
      --scheduler cosine-warmup --amp --debug 0
+
+    # Use eval_ghn.py to evaluate the trained GHN-3 model on ImageNet/CIFAR-10.
 
 """
 
@@ -47,7 +47,8 @@ def main():
     parser = argparse.ArgumentParser(description='GHN-3 training')
     parser.add_argument('--max_shape', type=str, default=None,
                         help='max shape "c_out, c_in" of the predicted params. '
-                             'If None, max_shape will be calculated based on the --hid and --dataset arguments.')
+                             'If None, max_shape will be calculated based on the --hid and --dataset arguments '
+                             'according to the hyperparameters in the GHN-2/GHN-3 papers.')
     args = parser.parse_known_args()[0]
     max_shape = args.max_shape
 

@@ -136,7 +136,6 @@ class Trainer:
 
         if compile_mode not in [None, 'none', False]:
             try:
-                # torch._dynamo.config.verbose = True
                 log(f'compiling the model using the {compile_mode} mode to improve efficiency (if pytorch>=2.0)...')
                 model = torch.compile(model, mode=compile_mode)
                 log('compiling the model succeeded!')
@@ -213,11 +212,12 @@ class Trainer:
 
         self.reset_metrics(self.start_epoch)
 
-        if self.start_step >= self.n_batches - 1:
-            self.start_step = 0
-            self.start_epoch += 1  # resume from the next epoch
-        else:
-            self.start_step += 1  # resume from the next step
+        if state_dict is not None:
+            if self.start_step >= self.n_batches - 1:
+                self.start_step = 0
+                self.start_epoch += 1  # resume from the next epoch
+            else:
+                self.start_step += 1  # resume from the next step
 
     def get_lr(self):
         for param_group in self._optimizer.param_groups:

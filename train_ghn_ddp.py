@@ -34,6 +34,7 @@ Example:
 
 
 import argparse
+import time
 import torch.distributed as dist
 from functools import partial
 from ppuda.config import init_config
@@ -174,7 +175,7 @@ def main():
 
         trainer.scheduler_step()  # lr scheduler step
 
-    log('done!', flush=True)
+    log('done at {}!'.format(time.strftime('%Y%m%d-%H%M%S')))
     if ddp.ddp:
         clean_ddp()
 

@@ -28,6 +28,13 @@ from .ddp_utils import is_ddp, get_ddp_rank, avg_ddp_metric
 from .nn import from_pretrained
 from .ops import Network
 
+try:
+    from timm.optim import Lamb  # timm was not used in the paper's experiments, so it's optional
+    from timm.loss import BinaryCrossEntropy
+    from timm.data.mixup import Mixup
+except Exception as e:
+    print(e)
+
 log = partial(log, flush=True)
 process = psutil.Process(os.getpid())
 
@@ -54,11 +61,16 @@ class Trainer:
                  amp=False,
                  amp_min_scale=None,            # 1024 for GHN-3
                  amp_growth_interval=2000,      # 100 for GHN-3
+                 bce=False,
+                 mixup=False,
                  compile_mode=None,
                  ):
 
         self.main_device = device  # where loss is computed
-        self.criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(self.main_device)
+        if bce:
+            self.criterion = BinaryCrossEntropy(smoothing=label_smoothing).to(self.main_device)
+        else:
+            self.criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(self.main_device)
         self.n_batches = n_batches
         self.grad_clip = grad_clip
         self.auxiliary = auxiliary
@@ -80,6 +92,7 @@ class Trainer:
         else:
             self.rank = 0
 
+        self.mixup_fn = Mixup(mixup_alpha=0.1, cutmix_alpha=1.0) if mixup else None
         if predparam_wd > 0:
             self.param_decay = lambda p: torch.norm(p, p='fro')
 
@@ -146,18 +159,20 @@ class Trainer:
     def _reset(self, opt, opt_args, scheduler, scheduler_args, state_dict):
 
         assert 'lr' in opt_args, 'learning rate must be specified in opt_args'
-        if opt.lower() == 'adam':
-            optimizer = torch.optim.Adam
-        elif opt.lower() == 'adamw':
-            optimizer = torch.optim.AdamW
-        elif opt.lower() == 'sgd':
+        if opt.lower() == 'sgd':
             optimizer = torch.optim.SGD
-            opt_args['momentum'] = 0.9
-        elif opt.lower() == 'lamb':
-            from timm.optim import Lamb  # import here as it's not essential'
-            optimizer = Lamb
         else:
-            raise NotImplementedError(opt)
+            if opt.lower() == 'adam':
+                optimizer = torch.optim.Adam
+            elif opt.lower() == 'adamw':
+                optimizer = torch.optim.AdamW
+            elif opt.lower() == 'lamb':
+                optimizer = Lamb
+            else:
+                raise NotImplementedError(opt)
+            if 'momentum' in opt_args:
+                del opt_args['momentum']
+
         self._optimizer = optimizer(self._model.parameters(), **opt_args)
 
         if scheduler == 'cosine-warmup':
@@ -177,7 +192,7 @@ class Trainer:
         elif scheduler == 'cosine':
             self._scheduler = CosineAnnealingLR(self._optimizer, self.epochs, verbose=self.verbose)
         elif scheduler == 'step':
-            self._scheduler = StepLR(self._optimizer, 1, 0.97, verbose=self.verbose)
+            self._scheduler = StepLR(self._optimizer, verbose=self.verbose, **scheduler_args)
         elif scheduler == 'mstep':
             self._scheduler = MultiStepLR(self._optimizer, verbose=self.verbose, **scheduler_args)
             # e.g. GHN-2 scheduler_args={'milestones'=[200, 250], 'gamma'=0.1}
@@ -275,7 +290,11 @@ class Trainer:
                     models = self._model
 
                 targets = targets.to(self.main_device, non_blocking=True)  # loss will be computed on the main device
+                targets_one_hot = targets
                 images = images.to(self.main_device, non_blocking=True)
+
+                if self.mixup_fn is not None:
+                    images, targets = self.mixup_fn(images, targets)
 
                 if not isinstance(models, (list, tuple)):
                     models = [models]
@@ -336,7 +355,7 @@ class Trainer:
             if self.grad_clip > 0:
                 total_norm_clip = nn.utils.clip_grad_norm_(parameters, self.grad_clip)
             else:
-                total_norm_clip = 0
+                total_norm_clip = torch.zeros(1, device=self.main_device)
 
             if self.amp:
                 # Unscales gradients and calls
@@ -355,7 +374,7 @@ class Trainer:
             else:
                 self._optimizer.step()
 
-            targets = targets.view(1, -1).expand(len(logits), -1).reshape(-1)
+            targets = targets_one_hot.view(1, -1).expand(len(logits), -1).reshape(-1)
             logits = logits.reshape(-1, logits.shape[-1])
 
             # Update training metrics
@@ -408,7 +427,7 @@ class Trainer:
 
     def log(self, step=None):
         step_ = self._step if step is None else (step + 1)
-        if step_ % self.log_interval == 0 or step_ >= self.n_batches - 1:
+        if step_ % self.log_interval == 0 or step_ >= self.n_batches - 1 or step_ == 1:
             metrics = {metric: value.avg for metric, value in self.metrics.items()}
             if self.amp:
                 metrics['amp_scale'] = self.scaler._check_scale_growth_tracker('update')[0].item()

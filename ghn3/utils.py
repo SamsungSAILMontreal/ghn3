@@ -12,6 +12,7 @@ Utils.
 
 import os
 import time
+import math
 import psutil
 import torch
 import torchvision.transforms as transforms
@@ -95,38 +96,41 @@ def print_grads(model, verbose=True):
     return
 
 
-def transforms_imagenet(noise=False, cifar_style=False, im_size=224):
+def transforms_imagenet(noise=False, im_size=224, timm_aug=False):
     """
     This is the same code as in https://github.com/facebookresearch/ppuda/blob/main/ppuda/vision/transforms.py#L88,
     but without ColorJitter to more closely reproduce ResNet-50 training results.
     :param noise:
-    :param cifar_style:
     :param im_size:
+    :param timm_aug: add RandAugment and test crop ratio=0.95 based on
+    "ResNet strikes back: An improved training procedure in timm" (https://arxiv.org/abs/2110.00476)
     :return:
     """
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
     train_transform = [
-        transforms.RandomResizedCrop((32, 32) if cifar_style else im_size),
+        transforms.RandomResizedCrop(im_size),
         transforms.RandomHorizontalFlip(),
-        # transforms.ColorJitter(  # remove this augmentation to more closely reproduce ResNet-50 training results
-        #     brightness=0.4,
-        #     contrast=0.4,
-        #     saturation=0.4,
-        #     hue=0.2),
-        transforms.ToTensor(),
-        normalize,
     ]
-    if cifar_style:
-        del train_transform[2]
+
+    if timm_aug:
+        import timm
+        train_transform.append(timm.data.auto_augment.rand_augment_transform('rand-m6'))
+
+    train_transform.extend([
+        transforms.ToTensor(),
+        normalize
+    ])
+
     train_transform = transforms.Compose(train_transform)
 
     valid_transform = [
-        transforms.Resize((32, 32) if cifar_style else max(im_size, 256)),
+        transforms.Resize((32, 32) if im_size == 32 else
+                          (math.floor(im_size / 0.95) if timm_aug else max(im_size, 256))),
         transforms.CenterCrop(max(im_size, 224)),
         transforms.ToTensor()
     ]
-    if cifar_style:
+    if im_size == 32:
         del valid_transform[1]
     if noise:
         raise NotImplementedError('This transform is not expected during training. '

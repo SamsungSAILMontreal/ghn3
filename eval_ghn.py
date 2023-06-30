@@ -25,6 +25,7 @@ import torch
 import torchvision
 import torchvision.models as models
 import time
+import argparse
 import inspect
 from ppuda.config import init_config
 from ppuda.utils import infer, AvgrageMeter, adjust_net
@@ -33,7 +34,10 @@ from ghn3 import from_pretrained, get_metadata, DeepNets1MDDP
 from ghn3.ops import Network
 
 
-args = init_config(mode='eval')
+parser = argparse.ArgumentParser(description='Evaluation of GHNs')
+parser.add_argument('--save_ckpt', type=str, default=None,
+                    help='checkpoint path to save the model with predicted parameters')
+args = init_config(mode='eval', parser=parser)
 
 ghn = from_pretrained(args.ckpt, debug_level=args.debug).to(args.device)  # get a pretrained GHN
 ghn.eval()  # should be a little bit more efficient in the eval mode
@@ -143,7 +147,17 @@ for m_ind, m in enumerate(models_queue):
             model = adjust_net(model, large_input=False)  # adjust the model for small images such as 32x32 in CIFAR-10
 
         with torch.no_grad():  # to improve efficiency
-            model = ghn(model, graphs=graphs, bn_track_running_stats=False, reduce_graph=True)  # predict parameters
+            model = ghn(model, graphs=graphs, bn_track_running_stats=True, reduce_graph=True)  # predict parameters
+            if args.save_ckpt is not None:
+                torch.save({'state_dict': model.state_dict()}, args.save_ckpt)
+                print('\nsaved the model with predicted parameters to {}\n'.format(args.save_ckpt))
+
+            # set BN layers to the training mode to enable eval w/o running statistics
+            def bn_set_train(module):
+                if isinstance(module, torch.nn.BatchNorm2d):
+                    module.track_running_stats = False
+                    module.training = True
+            model.apply(bn_set_train)
 
         total_norm = torch.norm(torch.stack([p.norm() for p in model.parameters()]), 2)
         if norms is not None:

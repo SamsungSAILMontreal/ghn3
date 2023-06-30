@@ -9,7 +9,6 @@ GHN-3 code.
 
 """
 
-
 import json
 import torch
 import torch.nn as nn
@@ -37,67 +36,72 @@ def from_pretrained(ghn3_name='ghn3xlm16.pt', **kwargs):
     :return: GHN model (in the training mode by default)
     """
 
-    if ghn3_name is None or ghn3_name.find('ghn') < 0:
-        raise ValueError(
-            'GHN ckpt must be specified. Specify one from https://huggingface.co/SamsungSAILMontreal/ghn3.')
+    assert ghn3_name is not None, 'GHN ckpt must be specified. ' \
+                                  'Specify one from https://huggingface.co/SamsungSAILMontreal/ghn3 ' \
+                                  'or from a local file path.'
 
     verbose = 'debug_level' in kwargs and kwargs['debug_level']
     if verbose:
         log('loading %s...' % ghn3_name)
+
+    ghn_config = None
     try:
         state_dict = joblib.load(hf_hub_download(repo_id='SamsungSAILMontreal/ghn3', filename=ghn3_name))
-        ghn_config = None
     except huggingface_hub.utils.HfHubHTTPError as e:
         print(e, '\nTrying to load from local file...')
         state_dict = torch.load(ghn3_name, map_location='cpu')
-        if 'config' not in state_dict:
-            raise ValueError('The checkpoint must contain a GHN config dictionary.')
-        ghn_config = state_dict['config']
+        if 'config' in state_dict:
+            ghn_config = state_dict['config']
         state_dict = state_dict['state_dict']
 
+    is_ghn2 = np.any([p_name.find('gnn.gru.') >= 0 for p_name in state_dict.keys()])
+
     if ghn_config is None:
-        is_ghn2 = False
-        if ghn3_name.find('ghn3t') >= 0:
-            hid = 64
-            heads = 8
-            layers = 3
-        elif ghn3_name.find('ghn3s') >= 0:
-            hid = 128
-            heads = 16
-            layers = 5
-        elif ghn3_name.find('ghn3l') >= 0:
-            hid = 256
-            heads = 16
-            layers = 12
-        elif ghn3_name.find('ghn3xl') >= 0:
-            hid = 384
-            heads = 16
-            layers = 24
-        elif ghn3_name.find('ghn2') >= 0:
-            hid = 32
-            heads = 0
-            layers = 1
-            is_ghn2 = True
-        else:
-            raise NotImplementedError(ghn3_name)
+        # infer GHN config from the state_dict assuming some default values
+
+        num_classes = kwargs.pop('num_classes', 10)
+        layers = kwargs.pop('layers', 0)
+        hid = kwargs.pop('hid', 32)
+        layernorm = kwargs.pop('layernorm', False)
+        pretrained = kwargs.pop('pretrained', False)
+        max_shape = kwargs.pop('max_shape', 64)
+
+        for p_name, p in state_dict.items():
+            if p_name.find('class_layer_predictor') >= 0:
+                num_classes = len(p)
+                break
+
+        s = 16 if num_classes >= 1000 else 11
+
+        for p_name, p in state_dict.items():
+            if p_name.endswith('ln.weight'):
+                layernorm = True
+            elif p_name.endswith('embed.weight'):
+                hid = p.shape[-1]
+            elif p_name.endswith('decoder.conv.2.weight'):
+                max_shape = int(len(p) ** 0.5)
+            elif p_name.endswith('shape_enc.embed_spatial.weight'):
+                s = 11 if len(p) == 9 else 16
+            elif p_name.endswith('ln1.weight') and p_name.find('gnn.') >= 0:
+                layers += 1
+            elif p_name.find('centrality_embed_in') >= 0 > p_name.find('gnn.'):
+                pretrained = True
 
         ghn_config = {'hid': hid,
-                      'max_shape': (hid * 2, hid * 2, 16, 16) if is_ghn2 else (hid, hid, 16, 16),
-                      'num_classes': 1000,
-                      'heads': heads,
+                      'max_shape': max_shape if isinstance(max_shape, tuple) else (max_shape, max_shape, s, s),
+                      'num_classes': num_classes,
+                      'heads': 16 if hid > 64 else 8,
                       'layers': layers,
                       'is_ghn2': is_ghn2,
                       'weight_norm': True,
                       've': True,
-                      'layernorm': True,
-                      'pretrained': True
+                      'layernorm': layernorm,
+                      'pretrained': pretrained
                       }
     else:
-        # Loading from the local file
         if 'is_ghn2' in ghn_config:
-            is_ghn2 = ghn_config['is_ghn2']
+            assert is_ghn2 == ghn_config['is_ghn2'], ('invalid GHN config', ghn_config)
         else:
-            is_ghn2 = np.any([p_name.find('gnn.gru.') >= 0 for p_name in state_dict.keys()])
             ghn_config['is_ghn2'] = is_ghn2
     ghn = GHN3(**ghn_config, **kwargs)
 
@@ -105,7 +109,12 @@ def from_pretrained(ghn3_name='ghn3xlm16.pt', **kwargs):
         for n, p in state_dict.items():
             if n.find('decoder.') >= 0 and p.dim() == 4:
                 state_dict[n] = p.squeeze()  # transforming 4D conv layer weights to 2D linear layer weights
-    ghn.load_state_dict(state_dict)
+    try:
+        ghn.load_state_dict(state_dict)
+    except Exception:
+        log('failed to load {} with config {}'.format(ghn3_name, ghn_config))
+        raise
+
     if verbose:
         log('loading %s with %d parameters is done!' % (ghn3_name,
                                                         sum([p.numel() for p in ghn.parameters()])))
@@ -126,8 +135,8 @@ class GHN3(GHN):
 
     Inherited from the GHN class (https://github.com/facebookresearch/ppuda/blob/main/ppuda/ghn/nn.py).
     But most of the functions are overridden to support GHN-3 and improve code.
-
     """
+
     def __init__(self, max_shape, num_classes, hid, heads=8, layers=3, is_ghn2=False, pretrained=False, **kwargs):
 
         act_layer = kwargs.pop('act_layer', nn.GELU)
@@ -711,6 +720,7 @@ class ConvDecoder3(ConvDecoder):
      Also, nn.Linear is used instead of nn.Conv2d to help to resolve some mysterious RuntimeError CUDA errors on A100.
 
     """
+
     def __init__(self, is_ghn2=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._is_ghn2 = is_ghn2

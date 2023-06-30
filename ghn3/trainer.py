@@ -290,7 +290,7 @@ class Trainer:
                     models = self._model
 
                 targets = targets.to(self.main_device, non_blocking=True)  # loss will be computed on the main device
-                targets_one_hot = targets
+                targets_one_hot = targets.clone()
                 images = images.to(self.main_device, non_blocking=True)
 
                 if self.mixup_fn is not None:

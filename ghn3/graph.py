@@ -710,7 +710,7 @@ class Graph:
                         # Check that this node belongs to the classification head by assuming a certain order of nodes
                         classifier_head = np.any([neighbors[j].startswith(('classifier', 'fc', 'head')) for j in [-1, -2]])
                     except Exception as e:
-                        print(e, i, len(self._nodes), op_name)
+                        # print(e, i, len(self._nodes), op_name)
                         classifier_head = True  # tricky case (set to True for now)
 
                     if op_name.startswith('Mean'):

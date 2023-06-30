@@ -29,7 +29,7 @@ print('loading the %s dataset...' % args.dataset)
 val_loader, num_classes = image_loader(args.dataset,
                                        args.data_dir,
                                        test=True,
-                                       test_batch_size=64,
+                                       test_batch_size=args.test_batch_size,
                                        num_workers=args.num_workers,
                                        noise=args.noise,
                                        im_size=299 if args.arch == 'inception_v3' else (224 if is_imagenet else 32),

@@ -22,7 +22,6 @@ Example
 
 
 import torch
-import torchvision
 import torchvision.models as models
 import time
 import argparse
@@ -151,6 +150,8 @@ for m_ind, m in enumerate(models_queue):
             if args.save_ckpt is not None:
                 torch.save({'state_dict': model.state_dict()}, args.save_ckpt)
                 print('\nsaved the model with predicted parameters to {}\n'.format(args.save_ckpt))
+
+            model.eval()  # set to the eval mode to disable dropout, etc.
 
             # set BN layers to the training mode to enable eval w/o running statistics
             def bn_set_train(module):

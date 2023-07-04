@@ -128,7 +128,8 @@ def transforms_imagenet(noise=False, im_size=224, timm_aug=False):
         transforms.Resize((32, 32) if im_size == 32 else
                           (math.floor(im_size / 0.95) if timm_aug else max(im_size, 256))),
         transforms.CenterCrop(max(im_size, 224)),
-        transforms.ToTensor()
+        transforms.ToTensor(),
+        normalize
     ]
     if im_size == 32:
         del valid_transform[1]
@@ -136,7 +137,6 @@ def transforms_imagenet(noise=False, im_size=224, timm_aug=False):
         raise NotImplementedError('This transform is not expected during training. '
                                   'Use ppuda.vision.transforms.transforms_imagenet for evaluation on noisy images.')
 
-    valid_transform.append(normalize)
     valid_transform = transforms.Compose(valid_transform)
 
     return train_transform, valid_transform

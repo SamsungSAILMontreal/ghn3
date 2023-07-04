@@ -823,7 +823,12 @@ def get_metadata(ghn3_name='ghn3xlm16.pt', arch=None, attr=None):
             log('WARNING: meta data not unavailable for %s' % ghn3_name)
             return None
 
-    cache_file = hf_hub_download(repo_id='SamsungSAILMontreal/ghn3', filename='ghn3_results.json')
+    try:
+        cache_file = hf_hub_download(repo_id='SamsungSAILMontreal/ghn3', filename='ghn3_results.json')
+    except Exception as e:
+        print('Error: ', e)
+        return None
+
     with open(cache_file, 'rb') as f:
         # md5 check to make sure the file is not corrupted
         md5sum = hashlib.md5(f.read()).hexdigest()

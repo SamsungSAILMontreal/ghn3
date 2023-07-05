@@ -63,8 +63,6 @@ def main():
     parser.add_argument('--label_smooth', type=float, default=0.1, help='label smoothing')
     parser.add_argument('--bce', action='store_true', help='use BCE loss instead of cross-entropy')
     parser.add_argument('--timm_aug', action='store_true', help='use timm augmentations (RandAugment, Mixup, Cutmix)')
-    parser.add_argument('--beta', type=float, default=1e-5, help='amount of noise added to predicted params '
-                                                                 '(if GHN is used for initialization)')
 
     ddp = setup_ddp()
     args = None
@@ -114,7 +112,7 @@ def main():
                       bce=args.bce,
                       mixup=args.timm_aug,
                       compile_mode=args.compile,          # pytorch2.0 compilation for potential speedup (default: None)
-                      beta=args.beta
+                      beta=args.beta,                     # amount of noise added to params (if GHN is used for init)
                       )
 
     log('\nStarting training {} with {} parameters!'.format(args.arch.upper(), capacity(trainer._model)[1]))

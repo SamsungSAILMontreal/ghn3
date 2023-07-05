@@ -42,7 +42,7 @@ def setup_ddp():
 
         args.ddp = True
         dist.init_process_group(backend='nccl' if args.device.startswith('cuda') else 'gloo',
-                                timeout=timedelta(minutes=2),
+                                timeout=timedelta(minutes=30),  # increase timeout to avoid sync errors on some clusters
                                 world_size=args.world_size,
                                 rank=args.gpu)
         args.rank = dist.get_rank()

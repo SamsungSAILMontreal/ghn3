@@ -64,6 +64,7 @@ class Trainer:
                  bce=False,
                  mixup=False,
                  compile_mode=None,
+                 beta=1e-5,
                  ):
 
         self.main_device = device  # where loss is computed
@@ -127,7 +128,7 @@ class Trainer:
                 ghn = from_pretrained(ckpt, debug_level=1).to('cpu')  # get a pretrained GHN
                 model.to('cpu')
                 model = ghn(model, bn_track_running_stats=True, keep_grads=False, reduce_graph=False)  # predict params
-                model = init(model, orth=False, beta=1e-5)  # add a bit of noise to break symmetry of predicted params
+                model = init(model, orth=False, beta=beta)  # add a bit of noise to break symmetry of predicted params
                 model.to(self.rank if self.ddp else self.main_device)
 
         self._is_ghn = isinstance(model, GHN) or (hasattr(model, 'module') and isinstance(model.module, GHN))

@@ -49,6 +49,7 @@ def main():
     parser.add_argument('--compile', type=str, default=None, help='use pytorch2.0 compilation for potential speedup')
     parser.add_argument('--ghn2', action='store_true', help='train GHN-2, also can use code from'
                                                             ' https://github.com/facebookresearch/ppuda to train GHN-2')
+    parser.add_argument('--interm_epoch', type=int, default=5, help='intermediate epochs to keep checkpoints for')
     ghn2 = parser.parse_known_args()[0].ghn2
 
     ddp = setup_ddp()
@@ -145,7 +146,8 @@ def main():
             trainer.update(images, targets, graphs=next(graphs_queue))
             trainer.log(step)
             if args.save:
-                trainer.save(epoch, step, {'args': args, 'config': config})  # save GHN checkpoint
+                # save GHN checkpoint
+                trainer.save(epoch, step, {'args': args, 'config': config}, interm_epoch=args.interm_epoch)
 
         trainer.scheduler_step()  # lr scheduler step
 

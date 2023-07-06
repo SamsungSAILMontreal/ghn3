@@ -61,6 +61,7 @@ def main():
     parser.add_argument('--label_smooth', type=float, default=0.1, help='label smoothing')
     parser.add_argument('--bce', action='store_true', help='use BCE loss instead of cross-entropy')
     parser.add_argument('--timm_aug', action='store_true', help='use timm augmentations (RandAugment, Mixup, Cutmix)')
+    parser.add_argument('--interm_epoch', type=int, default=5, help='intermediate epochs to keep checkpoints for')
 
     ddp = setup_ddp()
     args = init_config(mode='train_net', parser=parser, verbose=ddp.rank == 0, debug=0, beta=1e-5)
@@ -125,7 +126,7 @@ def main():
             trainer.log(step)
 
             if args.save:
-                trainer.save(epoch, step, {'args': args})  # save model checkpoint
+                trainer.save(epoch, step, {'args': args}, interm_epoch=args.interm_epoch)  # save model checkpoint
 
         trainer.scheduler_step()  # lr scheduler step
 

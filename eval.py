@@ -23,7 +23,7 @@ from ppuda.utils import infer, adjust_net
 from ppuda.vision.loader import image_loader
 
 
-args = init_config(mode='eval')
+args = init_config(mode='eval', debug=0, arch='resnet50')
 is_imagenet = args.dataset.startswith('imagenet')
 print('loading the %s dataset...' % args.dataset)
 val_loader, num_classes = image_loader(args.dataset,
@@ -32,7 +32,7 @@ val_loader, num_classes = image_loader(args.dataset,
                                        test_batch_size=args.test_batch_size,
                                        num_workers=args.num_workers,
                                        noise=args.noise,
-                                       im_size=299 if args.arch == 'inception_v3' else (224 if is_imagenet else 32),
+                                       im_size=299 if args.arch == 'inception_v3' else args.imsize,
                                        seed=args.seed)[1:]
 
 model = eval(f'torchvision.models.{args.arch}(num_classes=num_classes)').to(args.device)

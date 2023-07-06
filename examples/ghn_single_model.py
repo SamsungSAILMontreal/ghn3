@@ -9,7 +9,7 @@ Predicts parameters of a PyTorch model using one of the pretrained GHNs.
 
 Example (use --debug 1 to perform additional sanity checks and print more information):
     export PYTHONPATH=$PYTHONPATH:./;  # to import ghn3 modules from the subfolder
-    python examples/ghn_single_model.py --ckpt ghn3tm8.pt --arch resnet50 --debug 0;
+    python examples/ghn_single_model.py --ckpt ghn3tm8.pt --arch resnet50
 
 """
 
@@ -21,7 +21,7 @@ from ghn3 import from_pretrained, norm_check, Graph, Logger
 
 
 # 1. Predict parameters of a PyTorch model using one of the pretrained GHNs
-args = init_config(mode='eval')  # load arguments from the command line
+args = init_config(mode='eval', debug=0, arch='resnet50', split='torch')  # load arguments from the command line
 assert args.arch is not None, ('architecture must be specified using, e.g. --arch resnet50', args.arch)
 
 ghn = from_pretrained(args.ckpt, debug_level=args.debug).to(args.device)  # get a pretrained GHN

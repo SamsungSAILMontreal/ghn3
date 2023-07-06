@@ -36,20 +36,19 @@ from ghn3.ops import Network
 parser = argparse.ArgumentParser(description='Evaluation of GHNs')
 parser.add_argument('--save_ckpt', type=str, default=None,
                     help='checkpoint path to save the model with predicted parameters')
-args = init_config(mode='eval', parser=parser)
+args = init_config(mode='eval', parser=parser, debug=0, split='torch')
 
 ghn = from_pretrained(args.ckpt, debug_level=args.debug).to(args.device)  # get a pretrained GHN
 ghn.eval()  # should be a little bit more efficient in the eval mode
 is_imagenet = args.dataset.startswith('imagenet')
 print('loading the %s dataset...' % args.dataset)
-im_size = 224 if is_imagenet else 32
 images_val, num_classes = image_loader(args.dataset,
                                        args.data_dir,
                                        test=True,
                                        test_batch_size=args.test_batch_size,
                                        num_workers=args.num_workers,
                                        noise=args.noise,
-                                       im_size=im_size,
+                                       im_size=args.imsize,
                                        seed=args.seed)[1:]
 
 if args.arch in [None, 'inception_v3']:
@@ -130,7 +129,7 @@ for m_ind, m in enumerate(models_queue):
             model.expected_input_sz = 299
             val_loader = images_val_im299
         else:
-            model.expected_input_sz = im_size
+            model.expected_input_sz = args.imsize
             val_loader = images_val
 
         n_params = sum([p.numel() for p in model.parameters()]) / 10 ** 6

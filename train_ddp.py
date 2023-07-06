@@ -46,7 +46,6 @@ Example:
 import torchvision
 import argparse
 import time
-import torch.distributed as dist
 from functools import partial
 from ppuda.config import init_config
 from ppuda.utils import capacity
@@ -59,46 +58,32 @@ log = partial(log, flush=True)
 def main():
     parser = argparse.ArgumentParser(description='ImageNet training')
     parser.add_argument('-c', '--compile', type=str, default=None, help='use pytorch2.0 compilation for efficiency')
-    parser.add_argument('-i', '--im_size', type=int, default=224, help='image size')
     parser.add_argument('--label_smooth', type=float, default=0.1, help='label smoothing')
     parser.add_argument('--bce', action='store_true', help='use BCE loss instead of cross-entropy')
     parser.add_argument('--timm_aug', action='store_true', help='use timm augmentations (RandAugment, Mixup, Cutmix)')
 
     ddp = setup_ddp()
-    args = None
-    if ddp.ddp and ddp.rank == 0:
-        args = init_config(mode='train_net', parser=parser, verbose=ddp.rank == 0)
-    if ddp.ddp:
-        dist.barrier()  # wait for the save folder to be created by rank 0 process
-    if args is None:
-        args = init_config(mode='train_net', parser=parser, verbose=ddp.rank == 0)
+    args = init_config(mode='train_net', parser=parser, verbose=ddp.rank == 0, debug=0, beta=1e-5)
+    # beta is the amount of noise added to params (if GHN is used for init, otherwise ignored)
 
     log('loading the %s dataset...' % args.dataset.upper())
     train_queue = image_loader(args.dataset,
                                args.data_dir,
-                               im_size=args.im_size,
                                test=not args.val,
                                load_train_anyway=True,
                                batch_size=args.batch_size,
                                num_workers=args.num_workers,
                                seed=args.seed,
                                ddp=ddp.ddp,
-                               transforms_train_val=transforms_imagenet(im_size=args.im_size, timm_aug=args.timm_aug),
+                               im_size=args.imsize,
+                               transforms_train_val=transforms_imagenet(im_size=args.imsize, timm_aug=args.timm_aug),
                                verbose=ddp.rank == 0)[0]
-
-    lr_scheduler = 'mstep' if args.scheduler is None else args.scheduler
-    if lr_scheduler == 'mstep':
-        scheduler_args = {'milestones': [30, 60], 'gamma': 0.1}  # standard ResNet hyperparams
-    elif lr_scheduler == 'step':
-        scheduler_args = {'step_size': 1, 'gamma': 0.97}  # linear learning rate decay (some recipes like DARTS)
-    else:
-        scheduler_args = None
 
     trainer = Trainer(eval(f'torchvision.models.{args.arch}()'),
                       opt=args.opt,
                       opt_args={'lr': args.lr, 'weight_decay': args.wd, 'momentum': args.momentum},
-                      scheduler=lr_scheduler,
-                      scheduler_args=scheduler_args,
+                      scheduler='mstep' if args.scheduler is None else args.scheduler,
+                      scheduler_args={'milestones': args.lr_steps, 'gamma': args.gamma},
                       n_batches=len(train_queue),
                       grad_clip=args.grad_clip,
                       device=args.device,
@@ -112,7 +97,7 @@ def main():
                       bce=args.bce,
                       mixup=args.timm_aug,
                       compile_mode=args.compile,          # pytorch2.0 compilation for potential speedup (default: None)
-                      beta=args.beta,                     # amount of noise added to params (if GHN is used for init)
+                      beta=args.beta,
                       )
 
     log('\nStarting training {} with {} parameters!'.format(args.arch.upper(), capacity(trainer._model)[1]))

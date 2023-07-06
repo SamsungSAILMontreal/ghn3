@@ -7,17 +7,22 @@
 
 Paper: https://arxiv.org/abs/2303.04143, https://openreview.net/forum?id=7UXf8dAz5T
 
+[Video presentation](https://recorder-v3.slideslive.com/?share=82913&s=2547b532-e0e2-462b-9312-4ab3dd1fa72a)
+
 # Introduction
 
 **Updates**
 
+- [July 11, 2023] Sync changes with the recent [PPUDA/GHN-2](https://github.com/facebookresearch/ppuda/) updates, 
+  - [timm](https://github.com/huggingface/pytorch-image-models) training recipes added from [ResNet strikes back](https://arxiv.org/abs/2110.00476)
+  - Video presentation of our paper is now available at [this link](https://recorder-v3.slideslive.com/?share=82913&s=2547b532-e0e2-462b-9312-4ab3dd1fa72a)
 - [June 26, 2023] Training and eval on CIFAR-10 and eval on the DeepNets splits are supported.
-- [June 22, 2023] Major code refactoring. Distributed (DDP) training and eval scripts added (see [Experiments](#experiments) below).
+- [June 22, 2023] Major code refactoring. 
+  - Distributed (DDP) training and eval scripts added (see [Experiments](#experiments) below).
 - [June 6, 2023] GHN-3 code improved (see [ghn3/nn.py](ghn3/nn.py)), more examples added (see [ghn_single_model.py](examples/ghn_single_model.py)).
 - [Apr 11, 2023] Cleaned up graph construction, sanity check for all PyTorch models.
 - [Apr 4, 2023] Slightly updated graph construction for ViT to be consistent with our paper. 
-Made four variants of our GHN-3 available: `ghn3tm8, ghn3sm8, ghn3lm8, ghn3xlm16` (see updated [ghn_all_pytorch.ipynb](examples/ghn_all_pytorch.ipynb)).
-`ghn3tm8` takes just 27MB so it is efficient to use in low-memory cases.
+  - Made four variants of our GHN-3 available: `ghn3tm8, ghn3sm8, ghn3lm8, ghn3xlm16` (see updated [ghn_all_pytorch.ipynb](examples/ghn_all_pytorch.ipynb)). `ghn3tm8` takes just 27MB so it is efficient to use in low-memory cases.
  
 
 This work extends the previous work [`Parameter Prediction for Unseen Deep Architectures`](https://github.com/facebookresearch/ppuda/) that introduced improved Graph HyperNetworks (GHN-2).

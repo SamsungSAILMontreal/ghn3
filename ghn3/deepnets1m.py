@@ -299,3 +299,21 @@ class NetBatchSamplerDDP(NetBatchSampler):
         return (self.max_nodes_batch is None or
                 (self.sampler.dataset if is_ddp() else self.sampler.data_source).nodes[batch].sum() <=
                 self.max_nodes_batch)
+
+    def __iter__(self):
+        epoch = 0
+        while True:  # infinite sampler
+            if is_ddp():
+                log(f'shuffle DeepNets1MDDP train loader: set seed to {self.sampler.seed}, epoch to {epoch}')
+                self.sampler.set_epoch(epoch)
+            batch = []
+            for idx in self.sampler:
+                batch.append(idx)
+                if len(batch) == self.batch_size:
+                    if self.check_batch(batch):
+                        yield batch
+                    batch = []
+            if len(batch) > 0 and not self.drop_last:
+                if self.check_batch(batch):
+                    yield batch
+            epoch += 1

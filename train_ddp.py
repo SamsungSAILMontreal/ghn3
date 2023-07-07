@@ -32,7 +32,7 @@ Example:
     # Fancy setup*, GHN-3 init, reduced lr: 4 GPUs (batch size=2024), DDP, automatic mixed precision, 100 ep, LAMB opt:
     export OMP_NUM_THREADS=8
     torchrun --standalone --nnodes=1 --nproc_per_node=4 train_ddp.py -d imagenet -D $SLURM_TMPDIR --arch resnet50 \
-    --name resnet50-ghn3init-ddp-timm -e 100 --wd 2e-2 -b 512 --lr 4e-3 --amp --scheduler cosine-warmup --opt lamb \
+    --name resnet50-ghn3init-ddp-timm -e 100 --wd 2e-2 -b 512 --lr 8e-3 --amp --scheduler cosine-warmup --opt lamb \
     -i 160 --grad_clip 0 --label_smooth 0 --bce --timm_aug --ckpt ghn3xlm16.pt
 
     # *Based on the A3 training procedure from "ResNet strikes back: An improved training procedure in timm"
@@ -65,7 +65,7 @@ def main():
 
     ddp = setup_ddp()
     args = init_config(mode='train_net', parser=parser, verbose=ddp.rank == 0, debug=0, beta=1e-5)
-    # beta is the amount of noise added to params (if GHN is used for init, otherwise ignored)
+    # beta is the amount of noise added to params (if GHN is used for init, otherwise ignored), default: 1e-5
 
     log('loading the %s dataset...' % args.dataset.upper())
     train_queue = image_loader(args.dataset,
@@ -102,24 +102,23 @@ def main():
                       )
 
     log('\nStarting training {} with {} parameters!'.format(args.arch.upper(), capacity(trainer._model)[1]))
-    if ddp.ddp:
-        log(f'shuffle {args.dataset} train loader (set seed to {args.seed})')
-        train_queue.sampler.set_epoch(args.seed)  # first set sample order according to the seed
 
     for epoch in range(trainer.start_epoch, args.epochs):
 
         log('\nepoch={:03d}/{:03d}, lr={:e}'.format(epoch + 1, args.epochs, trainer.get_lr()))
 
-        if ddp.ddp and epoch > trainer.start_epoch:  # make sure sample order is different for each epoch
-            log(f'shuffle {args.dataset} train loader (set seed to {epoch})')
+        if ddp.ddp:
+            # make sure sample order is different for each epoch and each seed
+            if epoch == trainer.start_epoch:
+                train_queue.sampler.seed = args.seed
             train_queue.sampler.set_epoch(epoch)
+            log(f'shuffle {args.dataset} train loader: set seed to {args.seed}, epoch to {epoch}')
 
         trainer.reset_metrics(epoch)
 
-        for step_, (images, targets) in enumerate(train_queue):
+        for step, (images, targets) in enumerate(train_queue, start=trainer.start_step):
 
-            step = step_ + (trainer.start_step if epoch == trainer.start_epoch else 0)
-            if step >= len(train_queue):  # if we resume training from some step > 0, then need to break the loop
+            if step >= len(train_queue):  # if we resume training from some start_step > 0, then need to break the loop
                 break
 
             trainer.update(images, targets)  # update model params

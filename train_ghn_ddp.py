@@ -122,29 +122,27 @@ def main():
 
     log('\nStarting training GHN with {} parameters!'.format(sum([p.numel() for p in ghn.parameters()])))
     if ddp.ddp:
-        log(f"shuffle DeepNets1MDDP train loader (set seed to {args.seed})", flush=True)
-        # first set sample order according to the seed
-        sampler.sampler.set_epoch(args.seed)
+        # make sure sample order is different for each seed
+        sampler.sampler.seed = args.seed
+        log(f'shuffle DeepNets1MDDP train loader: set seed to {args.seed}')
+        # for each DeepNets1MDDP epoch, the graph loader will be shuffled inside the ghn3/deepnets1m.py
+
     graphs_queue = iter(graphs_queue)
 
     for epoch in range(trainer.start_epoch, args.epochs):
 
         log('\nepoch={:03d}/{:03d}, lr={:e}'.format(epoch + 1, args.epochs, trainer.get_lr()))
 
-        if ddp.ddp and epoch > trainer.start_epoch:  # make sure sample order is different for each epoch
-            log(f'shuffle DeepNets1MDDP train loader (set seed to {epoch})')
-            sampler.sampler.set_epoch(epoch)
-
         trainer.reset_metrics(epoch)
 
-        for step_, (images, targets) in enumerate(train_queue):
+        for step, (images, targets) in enumerate(train_queue, start=trainer.start_step):
 
-            step = step_ + (trainer.start_step if epoch == trainer.start_epoch else 0)
-            if step >= len(train_queue):  # if we resume training from some step > 0, then need to break the loop
+            if step >= len(train_queue):  # if we resume training from some start_step > 0, then need to break the loop
                 break
 
             trainer.update(images, targets, graphs=next(graphs_queue))
             trainer.log(step)
+
             if args.save:
                 # save GHN checkpoint
                 trainer.save(epoch, step, {'args': args, 'config': config}, interm_epoch=args.interm_epoch)

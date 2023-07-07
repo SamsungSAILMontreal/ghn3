@@ -251,7 +251,6 @@ class Trainer:
         logits = []
         loss = 0
         loss_predwd = None
-
         nan_loss = torch.tensor(torch.nan, device=self.main_device)
 
         self._optimizer.zero_grad()
@@ -291,7 +290,7 @@ class Trainer:
                     models = self._model
 
                 targets = targets.to(self.main_device, non_blocking=True)  # loss will be computed on the main device
-                targets_one_hot = targets.clone()
+                targets_one_hot = targets
                 images = images.to(self.main_device, non_blocking=True)
 
                 if self.mixup_fn is not None:
@@ -307,7 +306,6 @@ class Trainer:
                         print(model)
                         raise
                     y = out[0] if isinstance(out, tuple) else out
-
                     loss += self.criterion(y, targets)
                     if self.auxiliary:
                         loss += self.auxiliary_weight * self.criterion(out[1], targets)
@@ -349,11 +347,10 @@ class Trainer:
             if self._step == 0 and self.rank == 0 and self.verbose:
                 print_grads(self._model)
 
-            parameters = []
-            for group in self._optimizer.param_groups:
-                parameters.extend(group['params'])
-
             if self.grad_clip > 0:
+                parameters = []
+                for group in self._optimizer.param_groups:
+                    parameters.extend(group['params'])
                 total_norm_clip = nn.utils.clip_grad_norm_(parameters, self.grad_clip)
             else:
                 total_norm_clip = torch.zeros(1, device=self.main_device)
@@ -369,9 +366,11 @@ class Trainer:
                 # Updates the scale for next iteration
                 self.scaler.update()
 
-                scale = self.scaler._check_scale_growth_tracker('update')[0]
-                if self.amp_min_scale is not None and scale < self.amp_min_scale:
-                    self.scaler._scale = torch.tensor(self.amp_min_scale).to(scale)
+                if self.amp_min_scale is not None:
+                    # if the scale is too small then training is hindered, so we manually keep the scale large enough
+                    scale = self.scaler._check_scale_growth_tracker('update')[0]
+                    if scale < self.amp_min_scale:
+                        self.scaler._scale = torch.tensor(self.amp_min_scale).to(scale)
             else:
                 self._optimizer.step()
 
@@ -389,9 +388,9 @@ class Trainer:
 
             self._step += 1
 
-        except RuntimeError as e:
+        except RuntimeError as err:
 
-            print('error', 'rank ', self.rank, type(e), e, graphs.net_args if graphs is not None else '')
+            print('error', 'rank ', self.rank, type(err), err, graphs.net_args if graphs is not None else '')
             loss = nan_loss
 
             print(traceback.format_exc())

@@ -175,11 +175,19 @@ class Trainer:
 
         self._optimizer = optimizer(self._model.parameters(), **opt_args)
 
-        if scheduler == 'cosine-warmup':
+        if scheduler.startswith('cosine-warmup'):
 
-            warmup_steps = 5
+            def parse_arg(arg, default):
+                p = scheduler.find(arg)
+                if p > 0:
+                    p_end = scheduler[p:].find('-')
+                    return float(scheduler[p + len(arg):len(scheduler) if p_end == -1 else p + p_end])
+                else:
+                    return default
+
+            warmup_steps = int(parse_arg('steps', 5))  # number of warmup steps/epochs (default: 5)
             cycles = 0.5
-            warmup_lr = 1e-5 / opt_args['lr']
+            warmup_lr = parse_arg('init_lr', 1e-5) / opt_args['lr']  # initial warmup lr (default: 1e-5)
 
             def lr_lambda(step):
                 # Based on https://huggingface.co/transformers/v1.2.0/_modules/pytorch_transformers/optimization.html

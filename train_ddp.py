@@ -23,20 +23,22 @@ Example:
     python train_ddp.py -d imagenet -D $SLURM_TMPDIR --arch resnet50 --name resnet50-ghn3init -e 90 --wd 1e-4 \
     -b 128 --lr 0.025 --ckpt ghn3xlm16.pt
 
-    # Fancy setup*, from scratch: 4 GPUs (batch size=2024), DDP, automatic mixed precision, 100 epochs, LAMB optimizer:
+    # Fancy setup*, from scratch: 4 GPUs (batch size=2024), DDP, automatic mixed precision, 50 epochs, LAMB optimizer:
     export OMP_NUM_THREADS=8
     torchrun --standalone --nnodes=1 --nproc_per_node=4 train_ddp.py -d imagenet -D $SLURM_TMPDIR --arch resnet50 \
-    --name resnet50-randinit-ddp-timm -e 100 --wd 2e-2 -b 512 --lr 8e-3 --amp --scheduler cosine-warmup --opt lamb \
+    --name resnet50-randinit-ddp-timm -e 50 --wd 1e-2 -b 512 --lr 8e-3 --amp --scheduler cosine-warmup --opt lamb \
     -i 160 --grad_clip 0 --label_smooth 0 --bce --timm_aug
+    # results in 75.62±0.15 top-1 accuracy (average of 3 runs)
 
-    # Fancy setup*, GHN-3 init, reduced lr: 4 GPUs (batch size=2024), DDP, automatic mixed precision, 100 ep, LAMB opt:
+    # Fancy setup*, GHN-3 init, reduced lr: 4 GPUs (batch size=2024), DDP, automatic mixed precision, 50 ep, LAMB opt:
     export OMP_NUM_THREADS=8
     torchrun --standalone --nnodes=1 --nproc_per_node=4 train_ddp.py -d imagenet -D $SLURM_TMPDIR --arch resnet50 \
-    --name resnet50-ghn3init-ddp-timm -e 100 --wd 2e-2 -b 512 --lr 8e-3 --amp --scheduler cosine-warmup --opt lamb \
+    --name resnet50-ghn3init-ddp-timm -e 50 --wd 1e-3 -b 512 --lr 6e-3 --amp --scheduler cosine --opt lamb \
     -i 160 --grad_clip 0 --label_smooth 0 --bce --timm_aug --ckpt ghn3xlm16.pt
+    # results in 75.83±0.11 top-1 accuracy (average of 3 runs)
 
     # *Based on the A3 training procedure from "ResNet strikes back: An improved training procedure in timm"
-    # (https://arxiv.org/abs/2110.00476).
+    # (https://arxiv.org/abs/2110.00476), but reduced to 50 epochs instead of 100.
 
     # Use eval.py to evaluate the trained model on ImageNet.
 

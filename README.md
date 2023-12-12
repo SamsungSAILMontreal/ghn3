@@ -1,13 +1,11 @@
 
 # Can We Scale Transformers to Predict Parameters of Diverse ImageNet Models?
 
-**To appear at [ICML 2023](https://icml.cc/virtual/2023/poster/24569)**
+**ICML 2023 [`link to the poster, slides and video presentation`](https://icml.cc/virtual/2023/poster/24569)**, [`tweet`](https://twitter.com/BorisAKnyazev/status/1633443437851598852)
 
 [Boris Knyazev](http://bknyaz.github.io/), [Doha Hwang](https://mila.quebec/en/person/doha-hwang/), [Simon Lacoste-Julien](http://www.iro.umontreal.ca/~slacoste/)
 
 Paper: https://arxiv.org/abs/2303.04143, https://openreview.net/forum?id=7UXf8dAz5T
-
-[Video presentation](https://recorder-v3.slideslive.com/?share=82913&s=2547b532-e0e2-462b-9312-4ab3dd1fa72a)
 
 # Introduction
 

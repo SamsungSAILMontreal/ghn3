@@ -64,14 +64,14 @@ class Trainer:
                  bce=False,
                  mixup=False,
                  compile_mode=None,
-                 beta=1e-5,
+                 beta=1e-5,  # to add noise to predicted parameters to improve their fine-tuning
                  ):
 
-        self.main_device = device  # where loss is computed
         if bce:
-            self.criterion = BinaryCrossEntropy(smoothing=label_smoothing).to(self.main_device)
+            self.criterion = BinaryCrossEntropy(smoothing=label_smoothing)
         else:
-            self.criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(self.main_device)
+            self.criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
         self.n_batches = n_batches
         self.grad_clip = grad_clip
         self.auxiliary = auxiliary
@@ -91,13 +91,13 @@ class Trainer:
             if self.verbose:
                 print(f'trainer rank {self.rank}')
         else:
-            self.rank = 0
+            self.rank = device
 
         self.mixup_fn = Mixup(mixup_alpha=0.1, cutmix_alpha=1.0) if mixup else None
         if predparam_wd > 0:
             self.param_decay = lambda p: torch.norm(p, p='fro')
 
-        model.to(self.rank if self.ddp else self.main_device)
+        model.to(self.rank)
 
         # Automatically resume from a checkpoint if exists or use GHN to initialize the model if ckpt is specified
         self.start_epoch = 0
@@ -116,7 +116,7 @@ class Trainer:
                     dist.barrier()  # make sure that all processes load the model before optimizing it
                     map_location = {'cuda:%d' % 0: device}
                 else:
-                    map_location = self.main_device
+                    map_location = self.rank
                 state_dict = torch.load(ckpt, map_location=map_location)
                 model.load_state_dict(state_dict['state_dict'])
                 self.start_epoch = state_dict['epoch']
@@ -129,7 +129,7 @@ class Trainer:
                 model.to('cpu')
                 model = ghn(model, bn_track_running_stats=True, keep_grads=False, reduce_graph=False)  # predict params
                 model = init(model, orth=False, beta=beta)  # add a bit of noise to break symmetry of predicted params
-                model.to(self.rank if self.ddp else self.main_device)
+                model.to(self.rank)
 
         self._is_ghn = isinstance(model, GHN) or (hasattr(model, 'module') and isinstance(model.module, GHN))
         if self.ddp:
@@ -195,19 +195,19 @@ class Trainer:
                     return np.linspace(warmup_lr, 1, warmup_steps)[step]
                 progress = float(step - warmup_steps) / float(max(1, self.epochs - warmup_steps))
                 return max(0.0, 0.5 * (1. + math.cos(math.pi * cycles * 2.0 * progress)))
-            self._scheduler = LambdaLR(self._optimizer, lr_lambda=lr_lambda, verbose=self.verbose)
+            self._scheduler = LambdaLR(self._optimizer, lr_lambda=lr_lambda)
 
         elif scheduler == 'cosine':
-            self._scheduler = CosineAnnealingLR(self._optimizer, self.epochs, verbose=self.verbose)
+            self._scheduler = CosineAnnealingLR(self._optimizer, self.epochs)
         elif scheduler == 'step':
-            self._scheduler = StepLR(self._optimizer, verbose=self.verbose, **scheduler_args)
+            self._scheduler = StepLR(self._optimizer, **scheduler_args)
         elif scheduler == 'mstep':
-            self._scheduler = MultiStepLR(self._optimizer, verbose=self.verbose, **scheduler_args)
+            self._scheduler = MultiStepLR(self._optimizer, **scheduler_args)
             # e.g. GHN-2 scheduler_args={'milestones'=[200, 250], 'gamma'=0.1}
         else:
             raise NotImplementedError(scheduler)
 
-        if state_dict is not None:
+        if state_dict is not None and 'optimizer' in state_dict:
             if self.verbose:
                 print('loading optimizer state')
             self._optimizer.load_state_dict(state_dict['optimizer'])
@@ -259,7 +259,7 @@ class Trainer:
         logits = []
         loss = 0
         loss_predwd = None
-        nan_loss = torch.tensor(torch.nan, device=self.main_device)
+        nan_loss = torch.tensor(torch.nan, device=self.rank)
 
         self._optimizer.zero_grad()
         if not self._model.training:
@@ -276,10 +276,8 @@ class Trainer:
                         # these are heavyweight Network objects that are less efficient but good for debugging
                         models = []
                         for nets_args in graphs.net_args:
-                            net = Network(is_imagenet_input=is_imagenet,
-                                          num_classes=num_classes,
-                                          **nets_args)
-                            models.append(net)
+                            # only for debugging (set is_imagenet_input and num_classes if needed)
+                            models.append(Network(**nets_args))
 
                     models = self._model(models,
                                          graphs.to_device(self.device),
@@ -291,15 +289,15 @@ class Trainer:
                         total_norm = 0
                         for m in models:
                             for p in m.parameters():
-                                total_norm += self.param_decay(p).to(self.main_device)
+                                total_norm += self.param_decay(p)
 
                         loss_predwd = self.predparam_wd * total_norm
                 else:
                     models = self._model
 
-                targets = targets.to(self.main_device, non_blocking=True)  # loss will be computed on the main device
+                targets = targets.to(self.rank, non_blocking=True)  # loss will be computed on the main device
                 targets_one_hot = targets
-                images = images.to(self.main_device, non_blocking=True)
+                images = images.to(self.rank, non_blocking=True)
 
                 if self.mixup_fn is not None:
                     images, targets = self.mixup_fn(images, targets)
@@ -361,7 +359,7 @@ class Trainer:
                     parameters.extend(group['params'])
                 total_norm_clip = nn.utils.clip_grad_norm_(parameters, self.grad_clip)
             else:
-                total_norm_clip = torch.zeros(1, device=self.main_device)
+                total_norm_clip = torch.zeros(1, device=self.rank)
 
             if self.amp:
                 # Unscales gradients and calls

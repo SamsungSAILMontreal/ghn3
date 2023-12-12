@@ -52,7 +52,7 @@ from functools import partial
 from ppuda.config import init_config
 from ppuda.utils import capacity
 from ppuda.vision.loader import image_loader
-from ghn3 import log, Trainer, setup_ddp, transforms_imagenet
+from ghn3 import log, Trainer, setup_ddp, transforms_imagenet, clean_ddp
 
 log = partial(log, flush=True)
 
@@ -132,6 +132,8 @@ def main():
         trainer.scheduler_step()  # lr scheduler step
 
     log('done at {}!'.format(time.strftime('%Y%m%d-%H%M%S')))
+    if ddp.ddp:
+        clean_ddp()
 
 
 if __name__ == '__main__':

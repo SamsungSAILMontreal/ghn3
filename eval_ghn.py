@@ -1,4 +1,4 @@
-# Copyright (c) 2023. Samsung Electronics Co., Ltd. All Rights Reserved.
+# Copyright (c) 2023. Samsung Electronics Co., Ltd.
 # All rights reserved.
 #
 # This source code is licensed under the license found in the
